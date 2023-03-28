@@ -3864,7 +3864,7 @@ HRESULT STDMETHODCALLTYPE MetadataImportRO::FindExportedTypeByName(
             if (implementation != mdtExportedType)
                 continue;
         }
-        else if (TypeFromToken(mdtExportedType) == mdtExportedType
+        else if (TypeFromToken(mdtExportedType) == ::mdtExportedType
                 && !IsNilToken(mdtExportedType))
         {
             // ExportedType passed in is nested but the current ExportedType is not.

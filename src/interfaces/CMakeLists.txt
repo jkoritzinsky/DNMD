@@ -3,6 +3,7 @@ set(SOURCES
   metadataimport.cpp
   hcorenum.cpp
   pal.cpp
+  internal/metadataimport.cpp
 )
 
 set(HEADERS
@@ -13,6 +14,7 @@ set(HEADERS
   ./tearoffbase.hpp
   ./pal.hpp
   ./dnmdowner.hpp
+  internal/metadataimport.hpp
 )
 
 if(NOT MSVC)

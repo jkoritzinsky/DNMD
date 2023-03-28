@@ -35,6 +35,9 @@ namespace Regression.UnitTests
         private delegate* unmanaged<void*, int, TestResult> _findAPIs;
         private delegate* unmanaged<void*, int, void**, int*, int, TestResult> _importAPIsIndirectionTables;
 
+        private delegate* unmanaged<void*, int, TestResult> _importInternalAPIs;
+        private delegate* unmanaged<void*, int, TestResult> _longRunningInternalAPIs;
+
         public ImportTests(ITestOutputHelper outputHelper)
         {
             Log = outputHelper;
@@ -45,8 +48,8 @@ namespace Regression.UnitTests
                 : "libregnative.so";
 
             nint mod = NativeLibrary.Load(Path.Combine(AppContext.BaseDirectory, regnativePath));
-            var initialize = (delegate* unmanaged<void*, void*, int>)NativeLibrary.GetExport(mod, "UnitInitialize");
-            int hr = initialize((void*)Dispensers.Baseline, (void*)Dispensers.DeltaImageBuilder);
+            var initialize = (delegate* unmanaged<void*, void*, void*, int>)NativeLibrary.GetExport(mod, "UnitInitialize");
+            int hr = initialize((void*)Dispensers.Baseline, (void*)Dispensers.DeltaImageBuilder, (void*)Dispensers.GetMetaDataInternalInterface);
             if (hr < 0)
             {
                 throw new Exception($"Initialization failed: 0x{hr:x}");
@@ -56,6 +59,8 @@ namespace Regression.UnitTests
             _longRunningAPIs = (delegate* unmanaged<void*, int, TestResult>)NativeLibrary.GetExport(mod, "UnitLongRunningAPIs");
             _findAPIs = (delegate* unmanaged<void*, int, TestResult>)NativeLibrary.GetExport(mod, "UnitFindAPIs");
             _importAPIsIndirectionTables = (delegate* unmanaged<void*, int, void**, int*, int, TestResult>)NativeLibrary.GetExport(mod, "UnitImportAPIsIndirectionTables");
+            _importInternalAPIs = (delegate* unmanaged<void*, int, TestResult>)NativeLibrary.GetExport(mod, "UnitImportInternalAPIs");
+            _longRunningInternalAPIs = (delegate* unmanaged<void*, int, TestResult>)NativeLibrary.GetExport(mod, "UnitLongRunningInternalAPIs");
         }
 
         private ITestOutputHelper Log { get; }
@@ -362,6 +367,42 @@ namespace Regression.UnitTests
             PEMemoryBlock block = managedLibrary.GetMetadata();
 
             _findAPIs(block.Pointer, block.Length).Check();
+        }
+
+        [Theory]
+        [MemberData(nameof(CoreFrameworkLibraries))]
+        public void ImportInternalAPIs_Core(string filename, PEReader managedLibrary) => ImportInternalAPIs(filename, managedLibrary);
+
+        [WindowsOnlyTheory]
+        [MemberData(nameof(Net20FrameworkLibraries))]
+        public void ImportInternalAPIs_Net20(string filename, PEReader managedLibrary) => ImportInternalAPIs(filename, managedLibrary);
+
+        [WindowsOnlyTheory]
+        [MemberData(nameof(Net40FrameworkLibraries))]
+        public void ImportInternalAPIs_Net40(string filename, PEReader managedLibrary) => ImportInternalAPIs(filename, managedLibrary);
+
+        private void ImportInternalAPIs(string filename, PEReader managedLibrary)
+        {
+            Debug.WriteLine($"{nameof(ImportInternalAPIs)} - {filename}");
+            using var _ = managedLibrary;
+            PEMemoryBlock block = managedLibrary.GetMetadata();
+
+            _importInternalAPIs(block.Pointer, block.Length).Check();
+        }
+
+        /// <summary>
+        /// These APIs are very expensive to run on all managed libraries. This library only runs
+        /// them on the system corelibs and only on a reduced selection of the tokens.
+        /// </summary>
+        [Theory]
+        [MemberData(nameof(AllCoreLibs))]
+        public void LongRunningInternalAPIs(string filename, PEReader managedLibrary)
+        {
+            Debug.WriteLine($"{nameof(LongRunningInternalAPIs)} - {filename}");
+            using var _lib = managedLibrary;
+            PEMemoryBlock block = managedLibrary.GetMetadata();
+
+            _longRunningAPIs(block.Pointer, block.Length).Check();
         }
     }
 }

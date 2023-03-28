@@ -1,4 +1,5 @@
 #include "regnative.hpp"
+#include <external/runtime/metadata.h>
 
 #include <array>
 #include <vector>
@@ -11,9 +12,12 @@
 
 namespace
 {
+    using MetaDataInternalInterfaceFactory = HRESULT(*)(void const*, uint32_t, uint32_t, const GUID&, void**);
+
     IMetaDataDispenser* g_baselineDisp;
     IMetaDataDispenser* g_deltaImageBuilder;
     IMetaDataDispenser* g_currentDisp;
+    MetaDataInternalInterfaceFactory g_baselineGetMetaDataInternalInterface;
 
     HRESULT CreateImport(IMetaDataDispenser* disp, void const* data, uint32_t dataLen, IMetaDataImport2** import)
     {
@@ -173,7 +177,7 @@ namespace
     }
 
 EXPORT
-HRESULT UnitInitialize(IMetaDataDispenser* baseline, IMetaDataDispenserEx* deltaBuilder)
+HRESULT UnitInitialize(IMetaDataDispenser* baseline, IMetaDataDispenserEx* deltaBuilder, MetaDataInternalInterfaceFactory getMetaDataInternalInterface)
 {
     HRESULT hr;
     if (baseline == nullptr)
@@ -197,6 +201,9 @@ HRESULT UnitInitialize(IMetaDataDispenser* baseline, IMetaDataDispenserEx* delta
 
     g_deltaImageBuilder = deltaBuilder;
 
+    g_baselineGetMetaDataInternalInterface = getMetaDataInternalInterface;
+
+    HRESULT hr;
     if (FAILED(hr = GetDispenser(IID_IMetaDataDispenser, reinterpret_cast<void**>(&g_currentDisp))))
         return hr;
 
@@ -244,6 +251,17 @@ namespace
         auto curr = (uint8_t const*)arr;
         auto end = curr + byteLength;
         for (; curr < end; ++curr)
+        {
+            hash = fnv1a(*curr, hash);
+        }
+        return hash;
+    }
+
+    uint32_t HashString(char const* arr)
+    {
+        uint32_t hash = Seed;
+        auto curr = arr;
+        for (; *curr != '\0'; ++curr)
         {
             hash = fnv1a(*curr, hash);
         }
@@ -1443,7 +1461,7 @@ namespace
         values.push_back(hr);
         if (hr == S_OK)
         {
-            values.push_back(HashByteArray(pszUtf8NamePtr, ::strlen(pszUtf8NamePtr) + 1));
+            values.push_back(HashString(pszUtf8NamePtr));
         }
         return values;
     }
@@ -2247,4 +2265,1345 @@ TestResult UnitImportAPIsIndirectionTables(void const* data, uint32_t dataLen, v
     return UnitImportAPIs(compositeImage.get(), compositeImageSize);
 
     END_DELEGATING_TEST();
+}
+namespace
+{
+    
+    std::vector<uint32_t> GetCustomAttributeByName(IMDInternalImport* import, LPCSTR customAttr, mdToken tkObj)
+    {
+        std::vector<uint32_t> values;
+
+        void const* ppData;
+        ULONG pcbData;
+        HRESULT hr = import->GetCustomAttributeByName(tkObj,
+            customAttr,
+            &ppData,
+            &pcbData);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(HashByteArray(ppData, pcbData));
+            values.push_back(pcbData);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetCustomAttribute_Nullable(IMDInternalImport* import, mdToken tkObj)
+    {
+        auto NullableAttrName = "System.Runtime.CompilerServices.NullableAttribute";
+        return GetCustomAttributeByName(import, NullableAttrName, tkObj);
+    }
+
+    std::vector<uint32_t> GetCustomAttribute_CompilerGenerated(IMDInternalImport* import, mdToken tkObj)
+    {
+        auto CompilerGeneratedAttrName = "System.Runtime.CompilerServices.CompilerGeneratedAttribute";
+        return GetCustomAttributeByName(import, CompilerGeneratedAttrName, tkObj);
+    }
+
+    void ValidateAndCloseEnum(IMDInternalImport* import, HENUMInternal* hcorenum, ULONG expectedCount)
+    {
+        ASSERT_EQUAL(expectedCount, import->EnumGetCount(hcorenum));
+        import->EnumClose(hcorenum);
+    }
+
+    std::vector<uint32_t> EnumTypeDefs(IMDInternalImport* import)
+    {
+        std::vector<uint32_t> tokens;
+        HENUMInternal hcorenum{};
+        ASSERT_EQUAL(S_OK, import->EnumTypeDefInit(&hcorenum));
+        mdToken tok;
+        while (import->EnumNext(&hcorenum, &tok))
+        {
+            tokens.push_back(tok);
+        }
+        ValidateAndCloseEnum(import, &hcorenum, (ULONG)tokens.size());
+        return tokens;
+    }
+
+    std::vector<uint32_t> EnumTokens(IMDInternalImport* import, mdToken tokenKind)
+    {
+        std::vector<uint32_t> tokens;
+        HENUMInternal hcorenum{};
+        ASSERT_EQUAL(S_OK, import->EnumAllInit(tokenKind, &hcorenum));
+        mdToken tok;
+        while (import->EnumNext(&hcorenum, &tok))
+        {
+            tokens.push_back(tok);
+        }
+        ValidateAndCloseEnum(import, &hcorenum, (ULONG)tokens.size());
+        return tokens;
+    }
+
+
+    std::vector<uint32_t> EnumTokens(IMDInternalImport* import, CorTokenType tokenKind, mdToken parent)
+    {
+        std::vector<uint32_t> tokens;
+        HENUMInternal hcorenum{};
+        ASSERT_EQUAL(S_OK, import->EnumInit(tokenKind, parent, &hcorenum));
+        mdToken tok;
+        while (import->EnumNext(&hcorenum, &tok))
+        {
+            tokens.push_back(tok);
+        }
+        ValidateAndCloseEnum(import, &hcorenum, (ULONG)tokens.size());
+        return tokens;
+    }
+
+    std::vector<uint32_t> EnumTypeRefs(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtTypeRef);
+    }
+
+    std::vector<uint32_t> EnumTypeSpecs(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtTypeSpec);
+    }
+
+    std::vector<uint32_t> EnumModuleRefs(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtModuleRef);
+    }
+
+    std::vector<uint32_t> EnumInterfaceImpls(IMDInternalImport* import, mdTypeDef typdef)
+    {
+        return EnumTokens(import, mdtInterfaceImpl, typdef);
+    }
+
+    std::vector<uint32_t> EnumMemberRefs(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtMemberRef);
+    }
+
+    std::vector<uint32_t> EnumMethods(IMDInternalImport* import, mdTypeDef typdef)
+    {
+        return EnumTokens(import, mdtMethodDef, typdef);
+    }
+
+    std::vector<uint32_t> EnumMethodImpls(IMDInternalImport* import, mdTypeDef typdef)
+    {
+        std::vector<uint32_t> tokens;
+        HENUMInternal hcorenumBody{};
+        HENUMInternal hcorenumDecl{};
+        ASSERT_EQUAL(S_OK, import->EnumMethodImplInit(typdef, &hcorenumBody, &hcorenumDecl));
+        mdToken tok;
+        while (import->EnumNext(&hcorenumBody, &tok))
+        {
+            tokens.push_back(tok);
+        }
+        while (import->EnumNext(&hcorenumDecl, &tok))
+        {
+            tokens.push_back(tok);
+        }
+        ValidateAndCloseEnum(import, &hcorenumBody, (ULONG)tokens.size());
+        ValidateAndCloseEnum(import, &hcorenumDecl, 0);
+        return tokens;
+    }
+
+    std::vector<uint32_t> EnumParams(IMDInternalImport* import, mdMethodDef methoddef)
+    {
+        return EnumTokens(import, mdtParamDef, methoddef);
+    }
+
+    std::vector<uint32_t> EnumMethodSpecs(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtMethodSpec);
+    }
+
+    std::vector<uint32_t> EnumEvents(IMDInternalImport* import, mdTypeDef tk)
+    {
+        return EnumTokens(import, mdtEvent, tk);
+    }
+
+    std::vector<uint32_t> EnumProperties(IMDInternalImport* import, mdTypeDef tk)
+    {
+        return EnumTokens(import, mdtProperty, tk);
+    }
+
+    std::vector<uint32_t> EnumFields(IMDInternalImport* import, mdTypeDef tk)
+    {
+        return EnumTokens(import, mdtFieldDef, tk);
+    }
+
+    std::vector<uint32_t> EnumGlobalFields(IMDInternalImport* import)
+    {
+        std::vector<uint32_t> tokens;
+        HENUMInternal hcorenum{};
+        ASSERT_EQUAL(S_OK, import->EnumGlobalFieldsInit(&hcorenum));
+        mdToken tok;
+        while (import->EnumNext(&hcorenum, &tok))
+        {
+            tokens.push_back(tok);
+        }
+        ValidateAndCloseEnum(import, &hcorenum, (ULONG)tokens.size());
+        return tokens;
+    }
+
+    std::vector<uint32_t> EnumGlobalFunctions(IMDInternalImport* import)
+    {
+        std::vector<uint32_t> tokens;
+        HENUMInternal hcorenum{};
+        ASSERT_EQUAL(S_OK, import->EnumGlobalFunctionsInit(&hcorenum));
+        mdToken tok;
+        while (import->EnumNext(&hcorenum, &tok))
+        {
+            tokens.push_back(tok);
+        }
+        ValidateAndCloseEnum(import, &hcorenum, (ULONG)tokens.size());
+        return tokens;
+    }
+
+    std::vector<uint32_t> EnumSignatures(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtSignature);
+    }
+    std::vector<uint32_t> EnumCustomAttributes(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtCustomAttribute);
+    }
+    std::vector<uint32_t> EnumCustomAttributes(IMDInternalImport* import, mdToken tk)
+    {
+        return EnumTokens(import, mdtCustomAttribute, tk);
+    }
+    std::vector<uint32_t> EnumCustomAttributesByName(IMDInternalImport* import, mdToken tk, LPCSTR name)
+    {
+        std::vector<uint32_t> tokens;
+        HENUMInternal hcorenum{};
+        ASSERT_EQUAL(S_OK, import->EnumCustomAttributeByNameInit(tk, name, &hcorenum));
+        mdToken tok;
+        while (import->EnumNext(&hcorenum, &tok))
+        {
+            tokens.push_back(tok);
+        }
+        ValidateAndCloseEnum(import, &hcorenum, (ULONG)tokens.size());
+        return tokens;
+    }
+
+    std::vector<uint32_t> EnumGenericParams(IMDInternalImport* import, mdToken tk)
+    {
+        return EnumTokens(import, mdtGenericParam, tk);
+    }
+
+    std::vector<uint32_t> EnumGenericParamConstraints(IMDInternalImport* import, mdGenericParam tk)
+    {
+        return EnumTokens(import, mdtGenericParamConstraint, tk);
+    }
+
+    std::vector<uint32_t> EnumAssemblyRefs(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtAssemblyRef);
+    }
+
+    std::vector<uint32_t> EnumFiles(IMDInternalImport* import)
+    {
+        return EnumTokens(import, mdtFile);
+    }
+
+    std::vector<uint32_t> GetParentToken(IMDInternalImport* import, mdToken tk)
+    {
+        std::vector<uint32_t> values;
+        // The parent value must be left unchanged if there's no parent and the method return S_OK.
+        // Callers in the runtime depend on that.
+        // We'll verify that behavior.
+        mdToken parent = 0xdeadbeef;
+        HRESULT hr = import->GetParentToken(tk, &parent);
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(parent);
+        
+        return values;
+    }
+
+    std::vector<uint32_t> FindTypeRef(IMDInternalImport* import)
+    {
+        std::vector<uint32_t> values;
+        HRESULT hr;
+        mdToken tk;
+
+        // The first assembly ref token typically contains System.Object and Enumerator.
+        mdToken const assemblyRefToken = 0x23000001;
+        hr = import->FindTypeRefByName("System", "Object", assemblyRefToken, &tk);
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(tk);
+
+        // Look for a type that won't ever exist
+        hr = import->FindTypeRefByName("DoesNotExist", "NotReal", assemblyRefToken, &tk);
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(tk);
+        return values;
+    }
+
+    std::vector<uint32_t> FindTypeDefByName(IMDInternalImport* import, LPCSTR ns, LPCSTR name, mdToken scope)
+    {
+        std::vector<uint32_t> values;
+
+        mdTypeDef ptd;
+        HRESULT hr = import->FindTypeDef(ns, name, scope, &ptd);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(ptd);
+        return values;
+    }
+
+    std::vector<uint32_t> FindExportedTypeByName(IMDInternalImport* import, LPCSTR ns, LPCSTR name, mdToken tkImplementation)
+    {
+        std::vector<uint32_t> values;
+
+        mdExportedType exported;
+        HRESULT hr = import->FindExportedTypeByName(ns, name, tkImplementation, &exported);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(exported);
+        return values;
+    }
+
+    std::vector<uint32_t> FindManifestResourceByName(IMDInternalImport* import, LPCSTR name)
+    {
+        std::vector<uint32_t> values;
+
+        mdManifestResource resource;
+        HRESULT hr = import->FindManifestResourceByName(name, &resource);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(resource);
+        return values;
+    }
+
+    std::vector<uint32_t> GetTypeDefProps(IMDInternalImport* import, mdTypeDef typdef)
+    {
+        std::vector<uint32_t> values;
+        DWORD pdwTypeDefFlags;
+        mdToken ptkExtends;
+        HRESULT hr = import->GetTypeDefProps(typdef,
+            &pdwTypeDefFlags,
+            &ptkExtends);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(pdwTypeDefFlags);
+            values.push_back(ptkExtends);
+        }
+
+        LPCSTR ns, name;
+        hr = import->GetNameOfTypeDef(typdef, &name, &ns);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashByteArray(ns, (ULONG)strlen(ns));
+            values.push_back(hash);
+            hash = HashByteArray(name, (ULONG)strlen(name));
+            values.push_back(hash);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetTypeRefProps(IMDInternalImport* import, mdTypeRef typeref)
+    {
+        std::vector<uint32_t> values;
+        mdToken ptkResolutionScope;
+        HRESULT hr = import->GetResolutionScopeOfTypeRef(typeref,
+            &ptkResolutionScope);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(ptkResolutionScope);
+        }
+
+        LPCSTR ns, name;
+        hr = import->GetNameOfTypeRef(typeref, &name, &ns);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashByteArray(ns, (ULONG)strlen(ns));
+            values.push_back(hash);
+            hash = HashByteArray(name, (ULONG)strlen(name));
+            values.push_back(hash);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetScopeProps(IMDInternalImport* import)
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR name;
+        GUID mvid;
+        HRESULT hr = import->GetScopeProps(
+            &name,
+            &mvid);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+
+            std::array<uint32_t, sizeof(GUID) / sizeof(uint32_t)> buffer{};
+            memcpy(buffer.data(), &mvid, buffer.size());
+            for (auto b : buffer)
+                values.push_back(b);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetModuleRefProps(IMDInternalImport* import, mdModuleRef moduleref)
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR name;
+        HRESULT hr = import->GetModuleRefProps(moduleref,
+            &name);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetMethodProps(IMDInternalImport* import, mdToken tk, void const** sig = nullptr, ULONG* sigLen = nullptr)
+    {
+        std::vector<uint32_t> values;
+
+        DWORD pdwAttr;
+        HRESULT hr = import->GetMethodDefProps(tk, &pdwAttr);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(pdwAttr);
+        }
+        PCCOR_SIGNATURE ppvSigBlob;
+        ULONG pcbSigBlob;
+        hr = import->GetSigOfMethodDef(tk, &pcbSigBlob, &ppvSigBlob);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(HashByteArray(ppvSigBlob, pcbSigBlob));
+            values.push_back(pcbSigBlob);
+            if (sig != nullptr)
+                *sig = ppvSigBlob;
+            if (sigLen != nullptr)
+                *sigLen = pcbSigBlob;
+        }
+        LPCSTR name;
+        hr = import->GetNameOfMethodDef(tk, &name);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetNameAndSigOfMethodDef(IMDInternalImport* import, mdToken tk)
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR name;
+        PCCOR_SIGNATURE ppvSigBlob;
+        ULONG pcbSigBlob;
+        HRESULT hr = import->GetNameAndSigOfMethodDef(tk, &ppvSigBlob, &pcbSigBlob, &name);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+            values.push_back(HashByteArray(ppvSigBlob, pcbSigBlob));
+            values.push_back(pcbSigBlob);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetParamProps(IMDInternalImport* import, mdToken tk)
+    {
+        std::vector<uint32_t> values;
+
+        USHORT pulSequence;
+        LPCSTR name;
+        DWORD pdwAttr;
+        HRESULT hr = import->GetParamDefProps(tk,
+            &pulSequence,
+            &pdwAttr,
+            &name);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(pulSequence);
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+            values.push_back(pdwAttr);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetMethodSpecProps(IMDInternalImport* import, mdMethodSpec methodSpec)
+    {
+        std::vector<uint32_t> values;
+
+        mdToken parent;
+        PCCOR_SIGNATURE sig;
+        ULONG sigLen;
+        HRESULT hr = import->GetMethodSpecProps(methodSpec,
+            &parent,
+            &sig,
+            &sigLen);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(parent);
+            values.push_back(HashByteArray(sig, sigLen));
+            values.push_back(sigLen);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetMemberRefProps(IMDInternalImport* import, mdMemberRef mr, PCCOR_SIGNATURE* sig = nullptr, ULONG* sigLen = nullptr)
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR name;
+        PCCOR_SIGNATURE ppvSigBlob;
+        ULONG pcbSigBlob;
+        HRESULT hr = import->GetNameAndSigOfMemberRef(mr,
+            &ppvSigBlob,
+            &pcbSigBlob,
+            &name);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+            values.push_back(HashByteArray(ppvSigBlob, pcbSigBlob));
+            values.push_back(pcbSigBlob);
+
+            if (sig != nullptr)
+                *sig = ppvSigBlob;
+            if (sigLen != nullptr)
+                *sigLen = pcbSigBlob;
+        }
+
+        mdToken ptk;
+        hr = import->GetParentOfMemberRef(mr, &ptk);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(ptk);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetEventProps(IMDInternalImport* import, mdEvent tk)
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR name;
+        DWORD pdwEventFlags;
+        mdToken ptkEventType;
+        HRESULT hr = import->GetEventProps(tk,
+            &name,
+            &pdwEventFlags,
+            &ptkEventType);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+            values.push_back(pdwEventFlags);
+            values.push_back(ptkEventType);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetPropertyProps(IMDInternalImport* import, mdProperty tk)
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR name;
+        DWORD pdwPropFlags;
+        PCCOR_SIGNATURE sig;
+        ULONG sigLen;
+        HRESULT hr = import->GetPropertyProps(tk,
+            &name,
+            &pdwPropFlags,
+            &sig,
+            &sigLen);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+            values.push_back(pdwPropFlags);
+            values.push_back(HashByteArray(sig, sigLen));
+            values.push_back(sigLen);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetFieldProps(IMDInternalImport* import, mdFieldDef tk, void const** sig = nullptr, ULONG* sigLen = nullptr)
+    {
+        std::vector<uint32_t> values;
+
+        DWORD pdwAttr;
+        HRESULT hr = import->GetFieldDefProps(tk, &pdwAttr);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(pdwAttr);
+        }
+        PCCOR_SIGNATURE ppvSigBlob;
+        ULONG pcbSigBlob;
+        hr = import->GetSigOfFieldDef(tk, &pcbSigBlob, &ppvSigBlob);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(HashByteArray(ppvSigBlob, pcbSigBlob));
+            values.push_back(pcbSigBlob);
+            if (sig != nullptr)
+                *sig = ppvSigBlob;
+            if (sigLen != nullptr)
+                *sigLen = pcbSigBlob;
+        }
+        LPCSTR name;
+        hr = import->GetNameOfFieldDef(tk, &name);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetCustomAttributeProps(IMDInternalImport* import, mdCustomAttribute cv)
+    {
+        std::vector<uint32_t> values;
+
+        mdToken ptkType;
+        HRESULT hr = import->GetCustomAttributeProps(cv, &ptkType);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(ptkType);
+        }
+        void const* sig;
+        ULONG sigLen;
+        hr = import->GetCustomAttributeAsBlob(cv, &sig, &sigLen);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(HashByteArray(sig, sigLen));
+            values.push_back(sigLen);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetGenericParamProps(IMDInternalImport* import, mdGenericParam gp)
+    {
+        std::vector<uint32_t> values;
+
+        ULONG pulParamSeq;
+        DWORD pdwParamFlags;
+        mdToken ptOwner;
+        DWORD reserved;
+        LPCSTR name;
+        HRESULT hr = import->GetGenericParamProps(gp,
+            &pulParamSeq,
+            &pdwParamFlags,
+            &ptOwner,
+            &reserved,
+            &name);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(pulParamSeq);
+            values.push_back(pdwParamFlags);
+            values.push_back(ptOwner);
+            values.push_back(reserved);
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetGenericParamConstraintProps(IMDInternalImport* import, mdGenericParamConstraint tk)
+    {
+        std::vector<uint32_t> values;
+
+        mdGenericParam ptGenericParam;
+        mdToken ptkConstraintType;
+        HRESULT hr = import->GetGenericParamConstraintProps(tk,
+            &ptGenericParam,
+            &ptkConstraintType);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(ptGenericParam);
+            values.push_back(ptkConstraintType);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetPinvokeMap(IMDInternalImport* import, mdToken tk)
+    {
+        std::vector<uint32_t> values;
+
+        DWORD pdwMappingFlags;
+        LPCSTR name;
+        mdModuleRef pmrImportDLL;
+        HRESULT hr = import->GetPinvokeMap(tk,
+            &pdwMappingFlags,
+            &name,
+            &pmrImportDLL);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(pdwMappingFlags);
+            uint32_t hash = HashString(name);
+            values.push_back(hash);
+            values.push_back(pmrImportDLL);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetTypeSpecFromToken(IMDInternalImport* import, mdTypeSpec typespec)
+    {
+        std::vector<uint32_t> values;
+
+        PCCOR_SIGNATURE sig;
+        ULONG sigLen;
+        HRESULT hr = import->GetTypeSpecFromToken(typespec, &sig, &sigLen);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(HashByteArray(sig, sigLen));
+            values.push_back(sigLen);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetSigFromToken(IMDInternalImport* import, mdSignature tkSig)
+    {
+        std::vector<uint32_t> values;
+
+        PCCOR_SIGNATURE sig;
+        ULONG sigLen;
+        HRESULT hr = import->GetSigFromToken(tkSig, &sigLen, &sig);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(HashByteArray(sig, sigLen));
+            values.push_back(sigLen);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetAllAssociates(IMDInternalImport* import, mdToken tkEventProp, std::vector<ASSOCIATE_RECORD>* associates = nullptr)
+    {
+        std::vector<uint32_t> values;
+
+        HENUMInternal hcorenum;
+        ASSERT_EQUAL(S_OK, import->EnumAssociateInit(tkEventProp, &hcorenum));
+        ULONG count = import->EnumGetCount(&hcorenum);
+        std::unique_ptr<ASSOCIATE_RECORD[]> recordsBuffer{ new ASSOCIATE_RECORD[count] };
+
+        HRESULT hr = import->GetAllAssociates(&hcorenum, recordsBuffer.get(), count);
+
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            for (ULONG i = 0; i < count; i++)
+            {
+                values.push_back(recordsBuffer[i].m_memberdef);
+                values.push_back(recordsBuffer[i].m_dwSemantics);
+            }
+
+            if (associates != nullptr)
+                *associates = std::vector<ASSOCIATE_RECORD>(recordsBuffer.get(), recordsBuffer.get() + count);
+        }
+        
+        return values;
+    }
+
+    std::vector<uint32_t> GetUserString(IMDInternalImport* import, mdString tkStr)
+    {
+        std::vector<uint32_t> values;
+
+        LPCWSTR name;
+        ULONG pchString;
+        BOOL is80Plus;
+        HRESULT hr = import->GetUserString(tkStr, &pchString, &is80Plus, &name);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashByteArray(name, pchString * sizeof(WCHAR));
+            values.push_back(hash);
+            values.push_back(pchString);
+            values.push_back(is80Plus);
+        }
+        return values;
+    }
+    std::vector<uint32_t> GetFieldMarshal(IMDInternalImport* import, mdToken tk)
+    {
+        std::vector<uint32_t> values;
+
+        PCCOR_SIGNATURE sig;
+        ULONG sigLen;
+        HRESULT hr = import->GetFieldMarshal(tk, &sig, &sigLen);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(HashByteArray(sig, sigLen));
+            values.push_back(sigLen);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetNestedClassProps(IMDInternalImport* import, mdTypeDef tk)
+    {
+        std::vector<uint32_t> values;
+
+        mdTypeDef ptdEnclosingClass;
+        HRESULT hr = import->GetNestedClassProps(tk, &ptdEnclosingClass);
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(ptdEnclosingClass);
+
+        return values;
+    }
+
+    std::vector<uint32_t> GetClassLayout(IMDInternalImport* import, mdTypeDef tk)
+    {
+        std::vector<uint32_t> values;
+        DWORD pdwPackSize;
+        HRESULT hr = import->GetClassPackSize(tk, &pdwPackSize);
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(pdwPackSize);
+        ULONG pulClassSize;
+        hr = import->GetClassTotalSize(tk, &pulClassSize);
+        values.push_back(hr);
+        if (hr == S_OK)
+            values.push_back(pulClassSize);
+        
+        MD_CLASS_LAYOUT layout;
+        hr = import->GetClassLayoutInit(tk, &layout);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            mdFieldDef field;
+            ULONG offset;
+            while ((hr = import->GetClassLayoutNext(&layout, &field, &offset)) == S_OK)
+            {
+                values.push_back(layout.m_ridFieldCur);
+                values.push_back(layout.m_ridFieldEnd);
+                values.push_back(field);
+                values.push_back(offset);
+            }
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetFieldRVA(IMDInternalImport* import, mdToken tk)
+    {
+        std::vector<uint32_t> values;
+
+        ULONG pulCodeRVA;
+        HRESULT hr = import->GetFieldRVA(tk, &pulCodeRVA);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(pulCodeRVA);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetVersionString(IMDInternalImport* import)
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR version;
+        HRESULT hr = import->GetVersionString(&version);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            uint32_t hash = HashString(version);
+            values.push_back(hash);
+        }
+
+        return values;
+    }
+
+    std::vector<uint32_t> GetAssemblyFromScope(IMDInternalImport* import)
+    {
+        std::vector<uint32_t> values;
+
+        mdAssembly mdAsm;
+        HRESULT hr = import->GetAssemblyFromScope(&mdAsm);
+        if (hr == S_OK)
+            values.push_back(mdAsm);
+        return values;
+    }
+
+    std::vector<size_t> GetAssemblyProps(IMDInternalImport* import, mdAssembly mda)
+    {
+        std::vector<size_t> values;
+        LPCSTR name;
+        std::vector<DWORD> processor(1);
+        std::vector<OSINFO> osInfo(1);
+
+        AssemblyMetaDataInternal metadata;
+
+        void const* publicKey;
+        ULONG publicKeyLength;
+        ULONG hashAlgId;
+        ULONG flags;
+        HRESULT hr = import->GetAssemblyProps(mda, &publicKey, &publicKeyLength, &hashAlgId, &name, &metadata, &flags);
+        values.push_back(hr);
+
+        if (hr == S_OK)
+        {
+            values.push_back((size_t)publicKey);
+            values.push_back(publicKeyLength);
+            values.push_back(hashAlgId);
+            values.push_back(HashString(name));
+            values.push_back(metadata.usMajorVersion);
+            values.push_back(metadata.usMinorVersion);
+            values.push_back(metadata.usBuildNumber);
+            values.push_back(metadata.usRevisionNumber);
+            values.push_back(HashString(metadata.szLocale));
+            values.push_back(flags);
+        }
+        return values;
+    }
+
+    std::vector<size_t> GetAssemblyRefProps(IMDInternalImport* import, mdAssemblyRef mdar)
+    {
+        std::vector<size_t> values;
+        LPCSTR name;
+        std::vector<DWORD> processor(1);
+        std::vector<OSINFO> osInfo(1);
+
+        AssemblyMetaDataInternal metadata;
+
+        void const* publicKeyOrToken;
+        ULONG publicKeyOrTokenLength;
+        void const* hash;
+        ULONG hashLength;
+        DWORD flags;
+        HRESULT hr = import->GetAssemblyRefProps(mdar, &publicKeyOrToken, &publicKeyOrTokenLength, &name, &metadata, &hash, &hashLength, &flags);
+        values.push_back(hr);
+
+        if (hr == S_OK)
+        {
+            values.push_back(publicKeyOrTokenLength != 0 ? (size_t)publicKeyOrToken : 0);
+            values.push_back(publicKeyOrTokenLength);
+            values.push_back(HashString(name));
+            values.push_back(metadata.usMajorVersion);
+            values.push_back(metadata.usMinorVersion);
+            values.push_back(metadata.usBuildNumber);
+            values.push_back(metadata.usRevisionNumber);
+            values.push_back(HashString(metadata.szLocale));
+            values.push_back(hashLength != 0 ? (size_t)hash : 0);
+            values.push_back(hashLength);
+            values.push_back(flags);
+        }
+        return values;
+    }
+
+    std::vector<size_t> GetFileProps(IMDInternalImport* import, mdFile mdf)
+    {
+        std::vector<size_t> values;
+
+        LPCSTR name;
+        void const* hash;
+        ULONG hashLength;
+        DWORD flags;
+        HRESULT hr = import->GetFileProps(mdf, &name, &hash, &hashLength, &flags);
+        values.push_back(hr);
+
+        if (hr == S_OK)
+        {
+            values.push_back(HashString(name));
+            values.push_back(hashLength != 0 ? (size_t)hash : 0);
+            values.push_back(hashLength);
+            values.push_back(flags);
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetExportedTypeProps(IMDInternalImport* import, mdFile mdf, LPCSTR* nsBuffer = nullptr, LPCSTR* nameBuffer = nullptr, uint32_t* implementationToken = nullptr)
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR ns;
+        LPCSTR name;
+        mdToken implementation;
+        mdTypeDef typeDef;
+        DWORD flags;
+        HRESULT hr = import->GetExportedTypeProps(mdf, &ns, &name, &implementation, &typeDef, &flags);
+        values.push_back(hr);
+
+        if (hr == S_OK)
+        {
+            values.push_back(HashString(ns));
+            values.push_back(HashString(name));
+            values.push_back(implementation);
+            values.push_back(typeDef);
+            values.push_back(flags);
+
+            if (nsBuffer != nullptr)
+                *nsBuffer = ns;
+            if (nameBuffer != nullptr)
+                *nameBuffer = name;
+            if (implementationToken != nullptr)
+                *implementationToken = implementation;
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> GetManifestResourceProps(IMDInternalImport* import, mdManifestResource mmr, LPCSTR* nameBuffer = nullptr)
+    {
+        std::vector<uint32_t> values;
+        
+        LPCSTR name;
+        ULONG offset;
+        mdToken implementation;
+        DWORD flags;
+        HRESULT hr = import->GetManifestResourceProps(mmr, &name, &implementation, &offset, &flags);
+        values.push_back(hr);
+
+        if (hr == S_OK)
+        {
+            values.push_back(HashString(name));
+            values.push_back(implementation);
+            values.push_back(flags);
+
+            if (nameBuffer != nullptr)
+                *nameBuffer = name;
+        }
+        return values;
+    }
+
+    std::vector<uint32_t> ResetEnum(IMDInternalImport* import)
+    {
+        std::vector<uint32_t> tokens;
+        auto typedefs = EnumTypeDefs(import);
+        if (typedefs.size() == 0)
+            return tokens;
+
+        auto tk = typedefs[0];
+        HENUMInternal henumInternal{};
+        try
+        {
+            static auto ReadInMethods = [](IMDInternalImport* import, HENUMInternal& henumInternal, mdToken tk, std::vector<uint32_t>& tokens)
+            {
+                ASSERT_EQUAL(S_OK, import->EnumInit(mdtMethodDef, tk, &henumInternal));
+                mdToken token;
+                while (import->EnumNext(&henumInternal, &token))
+                    tokens.push_back(token);
+            };
+
+            ReadInMethods(import, henumInternal, tk, tokens);
+
+            // Fully reset the enum
+            import->EnumReset(&henumInternal);
+            ReadInMethods(import, henumInternal, tk, tokens);
+        }
+        catch (...)
+        {
+            import->EnumClose(&henumInternal);
+            throw;
+        }
+        return tokens;
+    }
+}
+
+EXPORT
+TestResult UnitImportInternalAPIs(void const* data, uint32_t dataLen)
+{
+    BEGIN_TEST();
+
+    // Load metadata
+    dncp::com_ptr<IMDInternalImport> baselineImport;
+    ASSERT_EQUAL(S_OK, g_baselineGetMetaDataInternalInterface(data, dataLen, ofRead, IID_IMDInternalImport, (void**)&baselineImport));
+    dncp::com_ptr<IMDInternalImport> currentImport;
+    ASSERT_EQUAL(S_OK, CreateInternalImportOnMemory(data, dataLen, &currentImport));
+
+    
+    dncp::com_ptr<IMetaDataImport2> baselinePublic;
+    ASSERT_EQUAL(S_OK, CreateImport(g_baselineDisp, data, dataLen, &baselinePublic));
+    dncp::com_ptr<IMetaDataImport2> currentPublic;
+    ASSERT_EQUAL(S_OK, CreateImport(g_currentDisp, data, dataLen, &currentPublic));
+
+    // Verify APIs
+    ASSERT_EQUAL(ResetEnum(baselineImport), ResetEnum(currentImport));
+    ASSERT_EQUAL(GetScopeProps(baselineImport), GetScopeProps(currentImport));
+    ASSERT_EQUAL(GetVersionString(baselineImport), GetVersionString(currentImport));
+
+    auto sigs = ASSERT_AND_RETURN(EnumSignatures(baselineImport), EnumSignatures(currentImport));
+    for (auto sig : sigs)
+    {
+        ASSERT_EQUAL(GetSigFromToken(baselineImport, sig), GetSigFromToken(currentImport, sig));
+    }
+
+    auto strings = ASSERT_AND_RETURN(EnumUserStrings(baselinePublic), EnumUserStrings(currentPublic));
+    for (auto str : strings)
+    {
+        ASSERT_EQUAL(GetUserString(baselineImport, str), GetUserString(currentImport, str));
+    }
+
+    auto custAttrs = ASSERT_AND_RETURN(EnumCustomAttributes(baselineImport), EnumCustomAttributes(currentImport));
+    for (auto ca : custAttrs)
+    {
+        ASSERT_EQUAL(GetCustomAttributeProps(baselineImport, ca), GetCustomAttributeProps(currentImport, ca));
+        ASSERT_EQUAL(GetParentToken(baselineImport, ca), GetParentToken(currentImport, ca));
+    }
+
+    auto modulerefs = ASSERT_AND_RETURN(EnumModuleRefs(baselineImport), EnumModuleRefs(currentImport));
+    for (auto moduleref : modulerefs)
+    {
+        ASSERT_EQUAL(GetModuleRefProps(baselineImport, moduleref), GetModuleRefProps(currentImport, moduleref));
+    }
+
+    ASSERT_EQUAL(FindTypeRef(baselineImport), FindTypeRef(currentImport));
+    auto typerefs = ASSERT_AND_RETURN(EnumTypeRefs(baselineImport), EnumTypeRefs(currentImport));
+    for (auto typeref : typerefs)
+    {
+        ASSERT_EQUAL(GetTypeRefProps(baselineImport, typeref), GetTypeRefProps(currentImport, typeref));
+        ASSERT_EQUAL(GetCustomAttribute_CompilerGenerated(baselineImport, typeref), GetCustomAttribute_CompilerGenerated(currentImport, typeref));
+    }
+
+    auto typespecs = ASSERT_AND_RETURN(EnumTypeSpecs(baselineImport), EnumTypeSpecs(currentImport));
+    for (auto typespec : typespecs)
+    {
+        ASSERT_EQUAL(GetTypeSpecFromToken(baselineImport, typespec), GetTypeSpecFromToken(currentImport, typespec));
+        ASSERT_EQUAL(GetCustomAttribute_CompilerGenerated(baselineImport, typespec), GetCustomAttribute_CompilerGenerated(currentImport, typespec));
+    }
+
+    auto globalFunctions = ASSERT_AND_RETURN(EnumGlobalFunctions(baselineImport), EnumGlobalFunctions(currentImport));
+    for (auto globalFunction : globalFunctions)
+    {
+        ASSERT_EQUAL(GetMethodProps(baselineImport, globalFunction), GetMethodProps(currentImport, globalFunction));
+        ASSERT_EQUAL(GetCustomAttribute_CompilerGenerated(baselineImport, globalFunction), GetCustomAttribute_CompilerGenerated(currentImport, globalFunction));
+        ASSERT_EQUAL(GetParentToken(baselineImport, globalFunction), GetParentToken(currentImport, globalFunction));
+    }
+
+    auto globalFields = ASSERT_AND_RETURN(EnumGlobalFields(baselineImport), EnumGlobalFields(currentImport));
+    for (auto globalField : globalFields)
+    {
+        ASSERT_EQUAL(GetFieldProps(baselineImport, globalField), GetFieldProps(currentImport, globalField));
+        ASSERT_EQUAL(GetPinvokeMap(baselineImport, globalField), GetPinvokeMap(currentImport, globalField));
+        ASSERT_EQUAL(GetFieldRVA(baselineImport, globalField), GetFieldRVA(currentImport, globalField));
+        ASSERT_EQUAL(GetFieldMarshal(baselineImport, globalField), GetFieldMarshal(currentImport, globalField));
+        ASSERT_EQUAL(GetCustomAttribute_CompilerGenerated(baselineImport, globalField), GetCustomAttribute_CompilerGenerated(currentImport, globalField));
+        ASSERT_EQUAL(GetParentToken(baselineImport, globalField), GetParentToken(currentImport, globalField));
+    }
+    // TODO: GetPermissionSetProps (there's no mechanism to enumerate these on the internal interface, and it's not used)
+    // TODO: GetParentToken (we're missing some cases here)
+
+    auto typedefs = ASSERT_AND_RETURN(EnumTypeDefs(baselineImport), EnumTypeDefs(currentImport));
+    for (auto typdef : typedefs)
+    {
+        ASSERT_EQUAL(GetTypeDefProps(baselineImport, typdef), GetTypeDefProps(currentImport, typdef));
+        ASSERT_EQUAL(EnumInterfaceImpls(baselineImport, typdef), EnumInterfaceImpls(currentImport, typdef));
+        ASSERT_EQUAL(EnumMethodImpls(baselineImport, typdef), EnumMethodImpls(currentImport, typdef));
+        ASSERT_EQUAL(GetNestedClassProps(baselineImport, typdef), GetNestedClassProps(currentImport, typdef));
+        ASSERT_EQUAL(GetClassLayout(baselineImport, typdef), GetClassLayout(currentImport, typdef));
+        ASSERT_EQUAL(GetCustomAttribute_CompilerGenerated(baselineImport, typdef), GetCustomAttribute_CompilerGenerated(currentImport, typdef));
+        ASSERT_EQUAL(GetParentToken(baselineImport, typdef), GetParentToken(currentImport, typdef));
+
+        auto methoddefs = ASSERT_AND_RETURN(EnumMethods(baselineImport, typdef), EnumMethods(currentImport, typdef));
+        for (auto methoddef : methoddefs)
+        {
+            void const* sig = nullptr;
+            ULONG sigLen = 0;
+            ASSERT_EQUAL(GetMethodProps(baselineImport, methoddef), GetMethodProps(currentImport, methoddef, &sig, &sigLen));
+            ASSERT_EQUAL(GetNameAndSigOfMethodDef(baselineImport, methoddef), GetNameAndSigOfMethodDef(currentImport, methoddef));
+            ASSERT_EQUAL(GetCustomAttribute_CompilerGenerated(baselineImport, methoddef), GetCustomAttribute_CompilerGenerated(currentImport, methoddef));
+            ASSERT_EQUAL(GetParentToken(baselineImport, methoddef), GetParentToken(currentImport, methoddef));
+
+            auto paramdefs = ASSERT_AND_RETURN(EnumParams(baselineImport, methoddef), EnumParams(currentImport, methoddef));
+            for (auto paramdef : paramdefs)
+            {
+                ASSERT_EQUAL(GetParamProps(baselineImport, paramdef), GetParamProps(currentImport, paramdef));
+                ASSERT_EQUAL(GetCustomAttribute_Nullable(baselineImport, paramdef), GetCustomAttribute_Nullable(currentImport, paramdef));
+                ASSERT_EQUAL(GetParentToken(baselineImport, paramdef), GetParentToken(currentImport, paramdef));
+            }
+
+            ASSERT_EQUAL(GetPinvokeMap(baselineImport, methoddef), GetPinvokeMap(currentImport, methoddef));
+        }
+        
+        auto methodspecs = ASSERT_AND_RETURN(EnumMethodSpecs(baselineImport), EnumMethodSpecs(currentImport));
+        for (auto methodspec : methodspecs)
+        {
+            ASSERT_EQUAL(GetMethodSpecProps(baselineImport, methodspec), GetMethodSpecProps(currentImport, methodspec));
+            ASSERT_EQUAL(GetParentToken(baselineImport, methodspec), GetParentToken(currentImport, methodspec));
+        }
+
+        auto eventdefs = ASSERT_AND_RETURN(EnumEvents(baselineImport, typdef), EnumEvents(currentImport, typdef));
+        for (auto eventdef : eventdefs)
+        {
+            ASSERT_EQUAL(GetEventProps(baselineImport, eventdef), GetEventProps(currentImport, eventdef));
+            // We explicitly don't test enumerating associates with the regular enumerator
+            // as it's never used. The Associates enumerator is only used with GetAllAssociates.
+            ASSERT_EQUAL(GetAllAssociates(baselineImport, eventdef), GetAllAssociates(currentImport, eventdef));
+            ASSERT_EQUAL(GetParentToken(baselineImport, eventdef), GetParentToken(currentImport, eventdef));
+        }
+
+        auto properties = ASSERT_AND_RETURN(EnumProperties(baselineImport, typdef), EnumProperties(currentImport, typdef));
+        for (auto props : properties)
+        {
+            ASSERT_EQUAL(GetPropertyProps(baselineImport, props), GetPropertyProps(currentImport, props));
+            // We explicitly don't test enumerating associates with the regular enumerator
+            // as it's never used. The Associates enumerator is only used with GetAllAssociates.
+            ASSERT_EQUAL(GetAllAssociates(baselineImport, props), GetAllAssociates(currentImport, props));
+            ASSERT_EQUAL(GetParentToken(baselineImport, props), GetParentToken(currentImport, props));
+        }
+
+        auto fielddefs = ASSERT_AND_RETURN(EnumFields(baselineImport, typdef), EnumFields(currentImport, typdef));
+        for (auto fielddef : fielddefs)
+        {
+            ASSERT_EQUAL(GetFieldProps(baselineImport, fielddef), GetFieldProps(currentImport, fielddef));
+            ASSERT_EQUAL(GetPinvokeMap(baselineImport, fielddef), GetPinvokeMap(currentImport, fielddef));
+            ASSERT_EQUAL(GetFieldRVA(baselineImport, fielddef), GetFieldRVA(currentImport, fielddef));
+            ASSERT_EQUAL(GetFieldMarshal(baselineImport, fielddef), GetFieldMarshal(currentImport, fielddef));
+            ASSERT_EQUAL(GetCustomAttribute_Nullable(baselineImport, fielddef), GetCustomAttribute_Nullable(currentImport, fielddef));
+            ASSERT_EQUAL(GetParentToken(baselineImport, fielddef), GetParentToken(currentImport, fielddef));
+        }
+
+        auto genparams = ASSERT_AND_RETURN(EnumGenericParams(baselineImport, typdef), EnumGenericParams(currentImport, typdef));
+        for (auto genparam : genparams)
+        {
+            ASSERT_EQUAL(GetGenericParamProps(baselineImport, genparam), GetGenericParamProps(currentImport, genparam));
+            auto genparamconsts = ASSERT_AND_RETURN(EnumGenericParamConstraints(baselineImport, genparam), EnumGenericParamConstraints(currentImport, genparam));
+            for (auto genparamconst : genparamconsts)
+            {
+                ASSERT_EQUAL(GetGenericParamConstraintProps(baselineImport, genparamconst), GetGenericParamConstraintProps(currentImport, genparamconst));
+            }
+        }
+    }
+
+    auto assemblyTokens = ASSERT_AND_RETURN(GetAssemblyFromScope(baselineImport), GetAssemblyFromScope(currentImport));
+    for (auto assembly : assemblyTokens)
+    {
+        ASSERT_EQUAL(GetAssemblyProps(baselineImport, assembly), GetAssemblyProps(currentImport, assembly));
+    }
+
+    auto assemblyRefs = ASSERT_AND_RETURN(EnumAssemblyRefs(baselineImport), EnumAssemblyRefs(currentImport));
+    for (auto assemblyRef : assemblyRefs)
+    {
+        ASSERT_EQUAL(GetAssemblyRefProps(baselineImport, assemblyRef), GetAssemblyRefProps(currentImport, assemblyRef));
+    }
+
+    auto files = ASSERT_AND_RETURN(EnumFiles(baselineImport), EnumFiles(currentImport));
+    for (auto file : files)
+    {
+        ASSERT_EQUAL(GetFileProps(baselineImport, file), GetFileProps(currentImport, file));
+    }
+
+    dncp::com_ptr<IMetaDataAssemblyImport> baselineAssembly;
+    dncp::com_ptr<IMetaDataAssemblyImport> currentAssembly;
+    ASSERT_EQUAL(S_OK, baselinePublic->QueryInterface(IID_IMetaDataAssemblyImport, (void**)&baselineAssembly));
+    ASSERT_EQUAL(S_OK, currentPublic->QueryInterface(IID_IMetaDataAssemblyImport, (void**)&currentAssembly));
+    auto exports = ASSERT_AND_RETURN(EnumExportedTypes(baselineAssembly), EnumExportedTypes(currentAssembly));
+    for (auto exportedType : exports)
+    {
+       LPCSTR ns;
+       LPCSTR name;
+       uint32_t implementation = mdTokenNil;
+       ASSERT_EQUAL(GetExportedTypeProps(baselineImport, exportedType), GetExportedTypeProps(currentImport, exportedType, &ns, &name, &implementation));
+       ASSERT_EQUAL(
+           FindExportedTypeByName(baselineImport, ns, name, implementation),
+           FindExportedTypeByName(currentImport, ns, name, implementation));
+    }
+
+    auto resources = ASSERT_AND_RETURN(EnumManifestResources(baselineAssembly), EnumManifestResources(currentAssembly));
+    for (auto resource : resources)
+    {
+       LPCSTR name;
+       ASSERT_EQUAL(GetManifestResourceProps(baselineImport, resource), GetManifestResourceProps(currentImport, resource, &name));
+       ASSERT_EQUAL(FindManifestResourceByName(baselineImport, name), FindManifestResourceByName(currentImport, name));
+    }
+
+    END_TEST();
+}
+
+EXPORT
+TestResult UnitLongRunningInternalAPIs(void const* data, uint32_t dataLen)
+{
+    BEGIN_TEST();
+
+    // Load metadata
+    dncp::com_ptr<IMDInternalImport> baselineImport;
+    ASSERT_EQUAL(S_OK, g_baselineGetMetaDataInternalInterface(data, dataLen, ofRead, IID_IMDInternalImport, (void**)&baselineImport));
+    dncp::com_ptr<IMDInternalImport> currentImport;
+    ASSERT_EQUAL(S_OK, CreateInternalImportOnMemory(data, dataLen, &currentImport));
+
+    static auto VerifyMemberRef = [](IMDInternalImport* import, mdToken memberRef) -> std::vector<uint32_t>
+    {
+        std::vector<uint32_t> values;
+
+        LPCSTR name;
+        PCCOR_SIGNATURE ppvSigBlob;
+        ULONG pcbSigBlob;
+        HRESULT hr = import->GetNameAndSigOfMemberRef(memberRef,
+            &ppvSigBlob,
+            &pcbSigBlob,
+            &name);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(HashByteArray(ppvSigBlob, pcbSigBlob));
+            values.push_back(pcbSigBlob);
+            values.push_back(HashString(name));
+        }
+        mdToken parent;
+        hr = import->GetParentOfMemberRef(memberRef, &parent);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(parent);
+        }
+        hr = import->GetParentToken(memberRef, &parent);
+        values.push_back(hr);
+        if (hr == S_OK)
+        {
+            values.push_back(parent);
+        }
+
+        return values;
+    };
+
+    size_t stride;
+    size_t count;
+
+    auto memberrefs = ASSERT_AND_RETURN(EnumMemberRefs(baselineImport), EnumMemberRefs(currentImport));
+    count = 0;
+    stride = std::max(memberrefs.size() / 128, (size_t)16);
+    for (auto memberref : memberrefs)
+    {
+        if (count++ % stride != 0)
+            continue;
+
+        ASSERT_EQUAL(VerifyMemberRef(baselineImport, memberref), VerifyMemberRef(currentImport, memberref));
+    }
+
+    END_TEST();
 }

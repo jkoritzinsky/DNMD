@@ -10,6 +10,7 @@
 #include "dnmd_interfaces.hpp"
 #include "controllingiunknown.hpp"
 #include "metadataimportro.hpp"
+#include "internal/metadataimport.hpp"
 
 #include <cstring>
 
@@ -87,7 +88,8 @@ namespace
             try
             {
                 mdhandle_view handle_view{ obj->CreateAndAddTearOff<DNMDOwner>(std::move(md_ptr), std::move(copiedMem), std::move(nowOwned)) };
-                (void)obj->CreateAndAddTearOff<MetadataImportRO>(std::move(handle_view));
+                (void)obj->CreateAndAddTearOff<MetadataImportRO>(handle_view);
+                (void)obj->CreateAndAddTearOff<InternalMetadataImportRO>(std::move(handle_view));
             }
             catch(std::bad_alloc const&)
             {

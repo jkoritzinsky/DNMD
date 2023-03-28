@@ -14,6 +14,8 @@ namespace Common
         /// </summary>
         public static nint Baseline { get; } = GetBaselineRaw();
 
+        public static nint GetMetaDataInternalInterface { get; } = GetGetMetaDataInternalInterfaceRaw();
+
         /// <summary>
         /// Directory for NET Framework 2.0
         /// </summary>
@@ -32,7 +34,7 @@ namespace Common
         /// </summary>
         public static nint DeltaImageBuilder { get; } = GetBaselineRaw();
 
-        private static unsafe nint GetBaselineRaw()
+        private static nint GetBaselineModule()
         {
 #if NETFX_20_BASELINE
             var baseline = Path.Combine(GetNetFx20Install(), "mscorwks.dll");
@@ -44,10 +46,15 @@ namespace Common
                 : OperatingSystem.IsMacOS() ? "libcoreclr.dylib"
                 : "libcoreclr.so";
 
-            var baseline = Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, runtimeName);
+            var baseline = Path.Combine(@"E:\source\runtime3\artifacts\bin\coreclr\windows.x64.Release", runtimeName);
 #endif
 
-            nint mod = NativeLibrary.Load(baseline);
+            return NativeLibrary.Load(baseline);
+        }
+
+        private static unsafe nint GetBaselineRaw()
+        {
+            var mod = GetBaselineModule();
             var getter = (delegate* unmanaged<in Guid, in Guid, out nint, int>)NativeLibrary.GetExport(mod, "MetaDataGetDispenser");
 
             Guid clsid = new("E5CB7A31-7512-11D2-89CE-0080C792E5D8"); //CLSID_CorMetaDataDispenserRuntime
@@ -59,6 +66,11 @@ namespace Common
             }
 
             return dispenser;
+        }
+
+        private static unsafe nint GetGetMetaDataInternalInterfaceRaw()
+        {
+            return NativeLibrary.GetExport(GetBaselineModule(), "GetMetaDataInternalInterface");
         }
 
         [SupportedOSPlatform("windows")]

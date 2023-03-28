@@ -13,4 +13,12 @@ HRESULT GetDispenser(
     REFGUID riid,
     void** ppObj);
 
+struct IMDInternalImport;
+
+extern "C" DNMD_EXPORT
+HRESULT CreateInternalImportOnMemory(
+    const void* pData,
+    ULONG cbData,
+    IMDInternalImport** ppInternalImport);
+
 #endif // _INC_DNMD_INTERFACES_HPP_
