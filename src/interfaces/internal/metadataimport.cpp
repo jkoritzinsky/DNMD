@@ -258,51 +258,27 @@ STDMETHODIMP InternalMetadataImportRO::EnumMethodImplInit(
 {
     // COMPAT, the RO version of this API does not return the decl tokens
     // and it returns the MethodImpl tokens in the body enum.
-    HRESULT hr;
     if (TypeFromToken(td) != mdtTypeDef)
         return E_INVALIDARG;
 
     HCORENUMImpl::CreateDynamicEnumInAllocatedMemory(ToHCORENUMImpl(phEnumDecl));
     HCORENUMImpl* enumBody = ToHCORENUMImpl(phEnumBody);
-    HCORENUMImpl::CreateDynamicEnumInAllocatedMemory(enumBody, 1);
-    HCORENUMImpl_ptr cleanup{ enumBody };
+    HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, enumBody);
     mdcursor_t cursor;
     uint32_t count;
     if (!md_create_cursor(m_handle.get(), mdtid_MethodImpl, &cursor, &count))
     {
-        cleanup.release();
+        HCORENUMImpl::InitTableEnum(*enumBody, 0, cursor, 0);
         return S_OK;
     }
 
-    struct _Finder
+    if (!md_find_range_from_cursor(cursor, mdtMethodImpl_Class, td, &cursor, &count))
     {
-        HCORENUMImpl& EnumImpl;
-        mdToken token;
-        HRESULT hr;
-        HRESULT Result; // Result of the operation
+        HCORENUMImpl::InitTableEnum(*enumBody, 0, cursor, 0);
+        return S_OK;
+    }
 
-        bool operator()(mdcursor_t c)
-        {
-            if (!md_cursor_to_token(c, &token))
-            {
-                Result = CLDB_E_FILE_CORRUPT;
-                return true;
-            }
-
-            if (FAILED(hr = HCORENUMImpl::AddToDynamicEnum(EnumImpl, token)))
-            {
-                Result = hr;
-                return true;
-            }
-
-            return false;
-        }
-    } finder{ *enumBody, mdTokenNil, S_OK, S_OK };
-
-    EnumTableRange(cursor, count, mdtMethodImpl_Class, td, finder);
-    RETURN_IF_FAILED(finder.Result);
-    cleanup.release();
-
+    HCORENUMImpl::InitTableEnum(*enumBody, 0, cursor, count);
     return S_OK;
 }
 STDMETHODIMP_(ULONG) InternalMetadataImportRO::EnumMethodImplGetCount(
