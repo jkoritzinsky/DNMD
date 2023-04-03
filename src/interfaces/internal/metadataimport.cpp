@@ -7,8 +7,21 @@
 #endif // DNMD_BUILD_SHARED
 #include "metadataimport.hpp"
 #include "dnmd_interfaces.hpp"
+#include "../hcorenum.hpp"
 
 #include <cassert>
+
+// C++ lifetime wrapper for HCORENUMImpl memory
+struct HCORENUMImplInPlaceDeleter
+{
+    using pointer = HCORENUMImpl*;
+    void operator()(HCORENUMImpl* mem)
+    {
+        HCORENUMImpl::DestroyInAllocatedMemory(mem);
+    }
+};
+
+using HCORENUMImplInPlace_ptr = std::unique_ptr<HCORENUMImpl, HCORENUMImplInPlaceDeleter>;
 
 static_assert(sizeof(HCORENUMImpl) <= sizeof(HENUMInternal), "HCORENUMImpl must fit in HENUMInternal");
 
@@ -27,83 +40,6 @@ static_assert(sizeof(HCORENUMImpl) <= sizeof(HENUMInternal), "HCORENUMImpl must 
 
 namespace
 {
-    HRESULT CreateEnumTokens(
-        mdhandle_t mdhandle,
-        mdtable_id_t mdtid,
-        HCORENUMImpl** pEnumImpl)
-    {
-        mdcursor_t cursor;
-        uint32_t rows;
-        if (!md_create_cursor(mdhandle, mdtid, &cursor, &rows))
-            return CLDB_E_RECORD_NOTFOUND;
-
-        HCORENUMImpl* enumImpl;
-        HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, enumImpl);
-        HCORENUMImpl::InitTableEnum(*enumImpl, 0, cursor, rows);
-        *pEnumImpl = enumImpl;
-        return S_OK;
-    }
-
-    struct TokenRangeFilter
-    {
-        col_index_t FilterColumn;
-        LPCSTR Value;
-    };
-
-    HRESULT CreateEnumTokenRange(
-        mdhandle_t mdhandle,
-        mdToken token,
-        col_index_t column,
-        _In_opt_ TokenRangeFilter const* filter,
-        HCORENUMImpl** pEnumImpl)
-    {
-        HRESULT hr;
-        mdcursor_t cursor;
-        if (!md_token_to_cursor(mdhandle, token, &cursor))
-            return CLDB_E_INDEX_NOTFOUND;
-
-        mdcursor_t begin;
-        uint32_t count;
-        if (!md_get_column_value_as_range(cursor, column, &begin, &count))
-            return CLDB_E_FILE_CORRUPT;
-
-        HCORENUMImpl* enumImpl;
-        if (filter == nullptr || filter->Value == nullptr)
-        {
-            HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, enumImpl);
-            HCORENUMImpl::InitTableEnum(*enumImpl, 0, begin, count);
-        }
-        else
-        {
-            assert(filter != nullptr && filter->Value != nullptr);
-
-            char const* toMatch;
-            mdToken matchedTk;
-            HCORENUMImpl::CreateDynamicEnumInAllocatedMemory(enumImpl);
-
-            HCORENUMImpl_ptr cleanup{ enumImpl };
-
-            mdcursor_t curr = begin;
-            for (uint32_t i = 0; i < count; ++i)
-            {
-                if (1 != md_get_column_value_as_utf8(curr, filter->FilterColumn, 1, &toMatch))
-                    return CLDB_E_FILE_CORRUPT;
-
-                if (0 == ::strcmp(toMatch, filter->Value))
-                {
-                    (void)md_cursor_to_token(curr, &matchedTk);
-                    RETURN_IF_FAILED(HCORENUMImpl::AddToDynamicEnum(*enumImpl, matchedTk));
-                }
-                (void)md_cursor_next(&curr);
-            }
-
-            enumImpl = cleanup.release();
-        }
-
-        *pEnumImpl = enumImpl;
-        return S_OK;
-    }
-
     HRESULT ConstructTypeName(
         char const* nspace,
         char const* name,
@@ -131,90 +67,6 @@ namespace
             ::strcat_s(buffer, bufferLength, name);
 
         return S_OK;
-    }
-
-    void SplitTypeName(
-        char* typeName,
-        char const** nspace,
-        char const** name)
-    {
-        // Search for the last delimiter.
-        char* pos = ::strrchr(typeName, '.');
-        if (pos == nullptr)
-        {
-            // No namespace is indicated by an empty string.
-            *nspace = "";
-            *name = typeName;
-        }
-        else
-        {
-            *pos = '\0';
-            *nspace = typeName;
-            *name = pos + 1;
-        }
-    }
-
-    // Starting from the supplied cursor, find and then enumerate
-    // the range of rows in "lookupRange" with the given "lookupTk"
-    // value. When a value is found, the supplied type instance will
-    // be used to call back to the caller.
-    //
-    // Example of type instance:
-    //   struct Operation
-    //   {
-    //       bool operator()(mdcursor_t cursor)
-    //       {
-    //           return stopEnumeration; // Return true to stop, false to continue.
-    //       }
-    //   };
-    template<typename T>
-    void EnumTableRange(
-        mdcursor_t begin,
-        uint32_t count,
-        col_index_t lookupRange,
-        mdToken lookupTk,
-        T& op)
-    {
-        mdcursor_t curr;
-        uint32_t currCount;
-        if (md_find_range_from_cursor(begin, lookupRange, lookupTk, &curr, &currCount))
-        {
-            // Table is sorted and subset found
-            for (uint32_t i = 0; i < currCount; ++i)
-            {
-                if (op(curr))
-                    return;
-                (void)md_cursor_next(&curr);
-            }
-        }
-        else
-        {
-            // Unsorted so we need to search across the entire table
-            curr = begin;
-            currCount = count;
-
-            // Read in for matching in bulk
-            mdToken matchedGroup[64];
-            uint32_t i = 0;
-            while (i < currCount)
-            {
-                int32_t read = md_get_column_value_as_token(curr, lookupRange, ARRAY_SIZE(matchedGroup), matchedGroup);
-                if (read == 0)
-                    break;
-
-                assert(read > 0);
-                for (int32_t j = 0; j < read; ++j)
-                {
-                    if (matchedGroup[j] == lookupTk)
-                    {
-                        if (op(curr))
-                            return;
-                    }
-                    (void)md_cursor_next(&curr);
-                }
-                i += read;
-            }
-        }
     }
 }
 
@@ -599,19 +451,19 @@ STDMETHODIMP InternalMetadataImportRO::EnumCustomAttributeByNameInit(
 {
     HRESULT hr;
     HCORENUMImpl* impl = ToHCORENUMImpl(phEnum);
+    HCORENUMImpl::CreateDynamicEnumInAllocatedMemory(impl);
 
     mdcursor_t cursor;
     uint32_t count;
     if (!md_create_cursor(m_handle.get(), mdtid_CustomAttribute, &cursor, &count))
-        return CLDB_E_FILE_CORRUPT;
-
-    HCORENUMImpl::CreateDynamicEnumInAllocatedMemory(impl);
-    HCORENUMImpl_ptr implCleanup{ impl };
-    mdcursor_t attributes;
-    uint32_t numAttributes;
-    if (!md_find_range_from_cursor(cursor, mdtCustomAttribute_Parent, RidFromToken(tkParent), &attributes, &numAttributes))
         return S_OK;
 
+    mdcursor_t attributes;
+    uint32_t numAttributes;
+    if (!md_find_range_from_cursor(cursor, mdtCustomAttribute_Parent, tkParent, &attributes, &numAttributes))
+        return S_OK;
+
+    HCORENUMImplInPlace_ptr implCleanup{ impl };
     for (uint32_t i = 0; i < numAttributes; i++, md_cursor_next(&attributes))
     {
         mdToken caToken;
@@ -729,7 +581,7 @@ STDMETHODIMP InternalMetadataImportRO::GetScopeProps(
         return CLDB_E_FILE_CORRUPT;
     
     if (pmvid != nullptr
-        && 1 != md_get_column_value_as_guid(c, mdtModule_Mvid, 1, pmvid))
+        && 1 != md_get_column_value_as_guid(c, mdtModule_Mvid, 1, (mdguid_t*)pmvid))
         return CLDB_E_FILE_CORRUPT;
     
     return S_OK;
@@ -1823,9 +1675,6 @@ STDMETHODIMP InternalMetadataImportRO::GetFieldMarshal(
     PCCOR_SIGNATURE *pSigNativeType,
     ULONG       *pcbNativeType)
 {
-    if (TypeFromToken(fd) != mdtFieldDef)
-        return E_INVALIDARG;
-
     mdcursor_t c;
     uint32_t count;
     if (!md_create_cursor(m_handle.get(), mdtid_FieldMarshal, &c, &count))
@@ -2120,7 +1969,7 @@ STDMETHODIMP InternalMetadataImportRO::GetUserString(
         return CLDB_E_FILE_CORRUPT;
     
     *pchString = string.str_bytes / sizeof(WCHAR);
-    *pwszUserString = string.str;
+    *pwszUserString = (LPCWSTR)string.str;
     if (pbIs80Plus != nullptr)
         *pbIs80Plus = string.final_byte;
     return S_OK;
@@ -3113,9 +2962,28 @@ STDMETHODIMP InternalMetadataImportRO::GetNameOfCustomAttribute(
     if (!md_token_to_cursor(m_handle.get(), mdAttribute, &c))
         return CLDB_E_FILE_CORRUPT;
     
-    mdcursor_t type;
-    if (1 != md_get_column_value_as_cursor(c, mdtCustomAttribute_Type, 1, &type))
+    mdcursor_t attrConstructor;
+    if (1 != md_get_column_value_as_cursor(c, mdtCustomAttribute_Type, 1, &attrConstructor))
         return CLDB_E_FILE_CORRUPT;
+    
+    mdToken ctorToken;
+    if (!md_cursor_to_token(attrConstructor, &ctorToken))
+        return CLDB_E_FILE_CORRUPT;
+    
+    mdcursor_t type;
+    switch (TypeFromToken(ctorToken))
+    {
+        case mdtMethodDef:
+            if (!md_find_cursor_of_range_element(attrConstructor, &type))
+                return CLDB_E_FILE_CORRUPT;
+            break;
+        case mdtMemberRef:
+            if (1 != md_get_column_value_as_cursor(attrConstructor, mdtMemberRef_Class, 1, &type))
+                return CLDB_E_FILE_CORRUPT;
+            break;
+        default:
+            return COR_E_BADIMAGEFORMAT;
+    }
     
     return ResolveTypeDefRefSpecToName(type, pszNamespace, pszName);
 }
@@ -3149,26 +3017,4 @@ STDMETHODIMP InternalMetadataImportRO::GetRvaOffsetData(
     // Requires significant information about table layout in memory.
     // Unused by CoreCLR
     return E_NOTIMPL;
-}
-
-extern "C" DNMD_EXPORT
-HRESULT CreateInternalImportOnMemory(
-    const void* pData,
-    ULONG cbData,
-    IMDInternalImport** ppInternalImport)
-{
-    mdhandle_t handle;
-    if (!md_create_handle(pData, cbData, &handle))
-    {
-        return CLDB_E_FILE_CORRUPT;
-    }
-
-    mdhandle_ptr md_ptr{ handle };
-    InternalMetadataImportRO* pImport = new(std::nothrow) InternalMetadataImportRO(std::move(md_ptr));
-    if (pImport == nullptr)
-    {
-        return E_OUTOFMEMORY;
-    }
-    *ppInternalImport = pImport;
-    return S_OK;
 }

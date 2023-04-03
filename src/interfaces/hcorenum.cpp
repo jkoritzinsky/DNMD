@@ -2,6 +2,8 @@
 #include <cassert>
 #include <cstring>
 
+#include "hcorenum.hpp"
+
 #define RETURN_IF_FAILED(exp) \
 { \
     hr = (exp); \

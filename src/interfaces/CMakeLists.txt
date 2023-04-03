@@ -12,6 +12,7 @@ set(HEADERS
   ./hcorenum.hpp
   ./controllingiunknown.hpp
   ./tearoffbase.hpp
+  ./hcorenum.hpp
   ./pal.hpp
   ./dnmdowner.hpp
   internal/metadataimport.hpp
@@ -43,6 +44,8 @@ add_library(dnmd::interfaces ALIAS dnmd_interfaces)
 
 target_include_directories(dnmd_interfaces_static PUBLIC $<INSTALL_INTERFACE:include>)
 target_include_directories(dnmd_interfaces PUBLIC $<INSTALL_INTERFACE:include>)
+target_include_directories(dnmd_interfaces PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(dnmd_interfaces_static PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_compile_definitions(dnmd_interfaces PRIVATE DNMD_BUILD_SHARED)
 

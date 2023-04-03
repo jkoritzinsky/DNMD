@@ -9,16 +9,29 @@
 #include <internal/dnmd_platform.hpp>
 #include <external/runtime/metadata.h>
 #include <external/runtime/metamodel.h>
+#include "tearoffbase.hpp"
+#include "dnmdowner.hpp"
 
 class InternalMetadataImportRO final : public TearOffBase<IMDInternalImport>
 {
     std::atomic_uint32_t _refCount = 1;
     mdhandle_view m_handle;
+protected:
+    virtual bool TryGetInterfaceOnThis(REFIID riid, void** ppvObject) override
+    {
+        assert(riid != IID_IUnknown);
+        if (riid == IID_IMDInternalImport)
+        {
+            *ppvObject = static_cast<IMDInternalImport*>(this);
+            return true;
+        }
+        return false;
+    }
 public:
 
-    MetadataImportRO(IUnknown* controllingUnknown, mdhandle_view md_ptr)
+    InternalMetadataImportRO(IUnknown* controllingUnknown, mdhandle_view md_ptr)
         : TearOffBase(controllingUnknown)
-        , _md_ptr{ md_ptr }
+        , m_handle{ md_ptr }
     { }
     mdhandle_t MetaData() const { return m_handle.get(); }
 public: // IMDInternalImport
@@ -757,145 +770,6 @@ public: // IMDInternalImport
         DWORD   *pFieldRvaRecordSize,       // [OUT] Size of each record in FieldRVA table.
         DWORD   *pFieldRvaCount             // [OUT] Number of records in FieldRVA table.
         ) override;
-
-public: // IUnknown
-    virtual HRESULT STDMETHODCALLTYPE QueryInterface(
-        /* [in] */ REFIID riid,
-        /* [iid_is][out] */ _COM_Outptr_ void __RPC_FAR* __RPC_FAR* ppvObject) override
-    {
-        if (ppvObject == nullptr)
-            return E_POINTER;
-
-        if (riid == IID_IUnknown)
-        {
-            *ppvObject = static_cast<IUnknown*>(static_cast<IMDInternalImport*>(this));
-        }
-        else if (riid == IID_IMDInternalImport)
-        {
-            *ppvObject = static_cast<IMDInternalImport*>(this);
-        }
-        else
-        {
-            *ppvObject = nullptr;
-            return E_NOINTERFACE;
-        }
-
-        (void)AddRef();
-        return S_OK;
-    }
-
-    virtual ULONG STDMETHODCALLTYPE AddRef(void) override
-    {
-        return ++_refCount;
-    }
-
-    virtual ULONG STDMETHODCALLTYPE Release(void) override
-    {
-        uint32_t c = --_refCount;
-        if (c == 0)
-            delete this;
-        return c;
-    }
 };
-
-enum class HCORENUMType : uint32_t
-{
-    Table = 1, Dynamic
-};
-
-// Represents a singly linked list or dynamic uint32_t array enumerator
-class HCORENUMImpl final
-{
-    HCORENUMType _type;
-    uint32_t _entrySpan; // The number of entries equal to a single unit.
-
-    struct EnumData final
-    {
-        union
-        {
-            // Enumerate for tables
-            struct
-            {
-                mdcursor_t Current;
-                mdcursor_t Start;
-            } Table;
-
-            // Enumerate for dynamic uint32_t array
-            struct
-            {
-                uint32_t Page[16];
-            } Dynamic;
-        };
-
-        uint32_t ReadIn;
-        uint32_t Total;
-        EnumData* Next;
-    };
-
-    EnumData _data;
-    EnumData* _curr;
-    EnumData* _last;
-
-public: // static
-    // Lifetime operations
-    static HRESULT CreateTableEnum(_In_ uint32_t count, _Out_ HCORENUMImpl** impl) noexcept;
-    static void CreateTableEnumInAllocatedMemory(_In_ uint32_t count, _Inout_ HCORENUMImpl* impl) noexcept;
-    static void InitTableEnum(_Inout_ HCORENUMImpl& impl, _In_ uint32_t index, _In_ mdcursor_t cursor, _In_ uint32_t rows) noexcept;
-
-    // If multiple values represent a single entry, the "entrySpan" argument
-    // can be used to indicate the count for a single entry.
-    static HRESULT CreateDynamicEnum(_Out_ HCORENUMImpl** impl, _In_ uint32_t entrySpan = 1) noexcept;
-    static void CreateDynamicEnumInAllocatedMemory(_Inout_ HCORENUMImpl* impl, _In_ uint32_t entrySpan = 1) noexcept;
-    static HRESULT AddToDynamicEnum(_Inout_ HCORENUMImpl& impl, uint32_t value) noexcept;
-
-    static void Destroy(_In_ HCORENUMImpl* impl) noexcept;
-
-    static void DestroyInAllocatedMemory(_In_ HCORENUMImpl* impl) noexcept;
-
-public: // instance
-    // Get the total items for this enumeration
-    uint32_t Count() const noexcept;
-
-    // Read in the tokens for this enumeration
-    HRESULT ReadTokens(
-        mdToken rTokens[],
-        ULONG cMax,
-        ULONG* pcTokens) noexcept;
-
-    HRESULT ReadTokenPairs(
-        mdToken rTokens1[],
-        mdToken rTokens2[],
-        ULONG cMax,
-        ULONG* pcTokens) noexcept;
-
-    // Reset the enumeration to a specific position
-    HRESULT Reset(_In_ ULONG position) noexcept;
-
-private:
-    HRESULT ReadOneToken(mdToken& rToken, uint32_t& count) noexcept;
-    HRESULT ReadTableTokens(
-        mdToken rTokens[],
-        uint32_t cMax,
-        uint32_t& tokenCount) noexcept;
-    HRESULT ReadDynamicTokens(
-        mdToken rTokens[],
-        uint32_t cMax,
-        uint32_t& tokenCount) noexcept;
-
-    HRESULT ResetTableEnum(_In_ uint32_t position) noexcept;
-    HRESULT ResetDynamicEnum(_In_ uint32_t position) noexcept;
-};
-
-struct HCORENUMImplInPlaceDeleter
-{
-    using pointer = HCORENUMImpl*;
-    void operator()(HCORENUMImpl* mem)
-    {
-        HCORENUMImpl::DestroyInAllocatedMemory(mem);
-    }
-};
-
-// C++ lifetime wrapper for HCORENUMImpl memory
-using HCORENUMImpl_ptr = std::unique_ptr<HCORENUMImpl, HCORENUMImplInPlaceDeleter>;
 
 #endif // _SRC_INTERFACES_INTERNAL_METADATAIMPORT_HPP_

@@ -203,7 +203,6 @@ HRESULT UnitInitialize(IMetaDataDispenser* baseline, IMetaDataDispenserEx* delta
 
     g_baselineGetMetaDataInternalInterface = getMetaDataInternalInterface;
 
-    HRESULT hr;
     if (FAILED(hr = GetDispenser(IID_IMetaDataDispenser, reinterpret_cast<void**>(&g_currentDisp))))
         return hr;
 
@@ -3343,14 +3342,13 @@ TestResult UnitImportInternalAPIs(void const* data, uint32_t dataLen)
     // Load metadata
     dncp::com_ptr<IMDInternalImport> baselineImport;
     ASSERT_EQUAL(S_OK, g_baselineGetMetaDataInternalInterface(data, dataLen, ofRead, IID_IMDInternalImport, (void**)&baselineImport));
-    dncp::com_ptr<IMDInternalImport> currentImport;
-    ASSERT_EQUAL(S_OK, CreateInternalImportOnMemory(data, dataLen, &currentImport));
-
-    
     dncp::com_ptr<IMetaDataImport2> baselinePublic;
     ASSERT_EQUAL(S_OK, CreateImport(g_baselineDisp, data, dataLen, &baselinePublic));
+
     dncp::com_ptr<IMetaDataImport2> currentPublic;
     ASSERT_EQUAL(S_OK, CreateImport(g_currentDisp, data, dataLen, &currentPublic));
+    dncp::com_ptr<IMDInternalImport> currentImport;
+    ASSERT_EQUAL(S_OK, currentPublic->QueryInterface(IID_IMDInternalImport, (void**)&currentImport));
 
     // Verify APIs
     ASSERT_EQUAL(ResetEnum(baselineImport), ResetEnum(currentImport));
@@ -3444,6 +3442,7 @@ TestResult UnitImportInternalAPIs(void const* data, uint32_t dataLen)
             {
                 ASSERT_EQUAL(GetParamProps(baselineImport, paramdef), GetParamProps(currentImport, paramdef));
                 ASSERT_EQUAL(GetCustomAttribute_Nullable(baselineImport, paramdef), GetCustomAttribute_Nullable(currentImport, paramdef));
+                ASSERT_EQUAL(GetFieldMarshal(baselineImport, paramdef), GetFieldMarshal(currentImport, paramdef));
                 ASSERT_EQUAL(GetParentToken(baselineImport, paramdef), GetParentToken(currentImport, paramdef));
             }
 
@@ -3553,8 +3552,10 @@ TestResult UnitLongRunningInternalAPIs(void const* data, uint32_t dataLen)
     // Load metadata
     dncp::com_ptr<IMDInternalImport> baselineImport;
     ASSERT_EQUAL(S_OK, g_baselineGetMetaDataInternalInterface(data, dataLen, ofRead, IID_IMDInternalImport, (void**)&baselineImport));
+    dncp::com_ptr<IMetaDataImport2> currentPublic;
+    ASSERT_EQUAL(S_OK, CreateImport(g_currentDisp, data, dataLen, &currentPublic));
     dncp::com_ptr<IMDInternalImport> currentImport;
-    ASSERT_EQUAL(S_OK, CreateInternalImportOnMemory(data, dataLen, &currentImport));
+    ASSERT_EQUAL(S_OK, currentPublic->QueryInterface(IID_IMDInternalImport, (void**)&currentImport));
 
     static auto VerifyMemberRef = [](IMDInternalImport* import, mdToken memberRef) -> std::vector<uint32_t>
     {
