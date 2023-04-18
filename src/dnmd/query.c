@@ -473,7 +473,7 @@ bool md_get_column_values_raw(mdcursor_t c, uint32_t values_length, bool* values
     return true;
 }
 
-typedef struct find_cxt__
+typedef struct _find_cxt_t
 {
     uint32_t col_offset;
     uint32_t data_len;
@@ -507,13 +507,12 @@ static int32_t col_compare_2bytes(void const* key, void const* row, void* cxt)
     uint16_t rhs = 0;
     size_t col_len = fcxt->data_len;
     assert(col_len == 2);
+    __assume(col_len == 2);
     bool success = read_u16(&col_data, &col_len, &rhs);
     assert(success && col_len == 0);
     (void)success;
 
-    return (lhs == rhs) ? 0
-        : (lhs < rhs) ? -1
-        : 1;
+    return lhs - rhs;
 }
 
 static int32_t col_compare_4bytes(void const* key, void const* row, void* cxt)
@@ -527,13 +526,118 @@ static int32_t col_compare_4bytes(void const* key, void const* row, void* cxt)
     uint32_t rhs = 0;
     size_t col_len = fcxt->data_len;
     assert(col_len == 4);
+    __assume(col_len == 4);
     bool success = read_u32(&col_data, &col_len, &rhs);
     assert(success && col_len == 0);
     (void)success;
 
-    return (lhs == rhs) ? 0
-        : (lhs < rhs) ? -1
-        : 1;
+    return lhs - rhs;
+}
+
+static void const* md_bsearch_2bytes(
+    void const* key,
+    void const* base,
+    rsize_t count,
+    rsize_t element_size,
+    find_cxt_t* cxt)
+{
+    assert(key != NULL && base != NULL);
+    while (count > 0)
+    {
+        void const* row = (uint8_t const*)base + (element_size * (count / 2));
+        int32_t res = col_compare_2bytes(key, row, cxt);
+        if (res == 0)
+            return row;
+
+        if (count == 1)
+        {
+            break;
+        }
+        else if (res < 0)
+        {
+            count /= 2;
+        }
+        else
+        {
+            base = row;
+            count -= count / 2;
+        }
+    }
+    return NULL;
+}
+
+static void const* md_bsearch_4bytes(
+    void const* key,
+    void const* base,
+    rsize_t count,
+    rsize_t element_size,
+    find_cxt_t* cxt)
+{
+    assert(key != NULL && base != NULL);
+    while (count > 0)
+    {
+        void const* row = (uint8_t const*)base + (element_size * (count / 2));
+        int32_t res = col_compare_4bytes(key, row, cxt);
+        if (res == 0)
+            return row;
+
+        if (count == 1)
+        {
+            break;
+        }
+        else if (res < 0)
+        {
+            count /= 2;
+        }
+        else
+        {
+            base = row;
+            count -= count / 2;
+        }
+    }
+    return NULL;
+}
+
+static void const* md_lsearch_2bytes(
+    void const* key,
+    void const* base,
+    rsize_t count,
+    rsize_t element_size,
+    void* cxt)
+{
+    assert(key != NULL && base != NULL);
+    void const* row = base;
+    for (rsize_t i = 0; i < count; ++i)
+    {
+        int32_t res = col_compare_2bytes(key, row, cxt);
+        if (res == 0)
+            return row;
+
+        // Onto the next row.
+        row = (uint8_t const*)row + element_size;
+    }
+    return NULL;
+}
+
+static void const* md_lsearch_4bytes(
+    void const* key,
+    void const* base,
+    rsize_t count,
+    rsize_t element_size,
+    void* cxt)
+{
+    assert(key != NULL && base != NULL);
+    void const* row = base;
+    for (rsize_t i = 0; i < count; ++i)
+    {
+        int32_t res = col_compare_4bytes(key, row, cxt);
+        if (res == 0)
+            return row;
+
+        // Onto the next row.
+        row = (uint8_t const*)row + element_size;
+    }
+    return NULL;
 }
 
 typedef int32_t(*md_bcompare_t)(void const* key, void const* row, void*);
