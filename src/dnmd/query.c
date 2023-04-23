@@ -534,69 +534,6 @@ static int32_t col_compare_4bytes(void const* key, void const* row, void* cxt)
     return lhs - rhs;
 }
 
-static void const* md_bsearch_2bytes(
-    void const* key,
-    void const* base,
-    rsize_t count,
-    rsize_t element_size,
-    find_cxt_t* cxt)
-{
-    assert(key != NULL && base != NULL);
-    while (count > 0)
-    {
-        void const* row = (uint8_t const*)base + (element_size * (count / 2));
-        int32_t res = col_compare_2bytes(key, row, cxt);
-        if (res == 0)
-            return row;
-
-        if (count == 1)
-        {
-            break;
-        }
-        else if (res < 0)
-        {
-            count /= 2;
-        }
-        else
-        {
-            base = row;
-            count -= count / 2;
-        }
-    }
-    return NULL;
-}
-
-static void const* md_bsearch_4bytes(
-    void const* key,
-    void const* base,
-    rsize_t count,
-    rsize_t element_size,
-    find_cxt_t* cxt)
-{
-    assert(key != NULL && base != NULL);
-    while (count > 0)
-    {
-        void const* row = (uint8_t const*)base + (element_size * (count / 2));
-        int32_t res = col_compare_4bytes(key, row, cxt);
-        if (res == 0)
-            return row;
-
-        if (count == 1)
-        {
-            break;
-        }
-        else if (res < 0)
-        {
-            count /= 2;
-        }
-        else
-        {
-            base = row;
-            count -= count / 2;
-        }
-    }
-    return NULL;
-}
 
 static void const* md_lsearch_2bytes(
     void const* key,
