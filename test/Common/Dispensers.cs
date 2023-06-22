@@ -46,7 +46,7 @@ namespace Common
                 : OperatingSystem.IsMacOS() ? "libcoreclr.dylib"
                 : "libcoreclr.so";
 
-            var baseline = Path.Combine(@"E:\source\runtime3\artifacts\bin\coreclr\windows.x64.Release", runtimeName);
+            var baseline = Path.Combine(@"E:\dnmd-playground\dotnet\shared\Microsoft.NETCore.App\8.0.0", runtimeName);
 #endif
 
             return NativeLibrary.Load(baseline);
