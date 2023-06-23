@@ -3339,6 +3339,8 @@ TestResult UnitImportInternalAPIs(void const* data, uint32_t dataLen)
 {
     BEGIN_TEST();
 
+    ASSERT_TRUE(g_baselineGetMetaDataInternalInterface != nullptr);
+
     // Load metadata
     dncp::com_ptr<IMDInternalImport> baselineImport;
     ASSERT_EQUAL(S_OK, g_baselineGetMetaDataInternalInterface(data, dataLen, ofRead, IID_IMDInternalImport, (void**)&baselineImport));
@@ -3548,6 +3550,8 @@ EXPORT
 TestResult UnitLongRunningInternalAPIs(void const* data, uint32_t dataLen)
 {
     BEGIN_TEST();
+
+    ASSERT_TRUE(g_baselineGetMetaDataInternalInterface != nullptr);
 
     // Load metadata
     dncp::com_ptr<IMDInternalImport> baselineImport;

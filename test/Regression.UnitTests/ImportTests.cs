@@ -28,6 +28,28 @@ namespace Regression.UnitTests
         }
     }
 
+    public sealed class InternalOnlyTheoryAttribute : TheoryAttribute
+    {
+        public InternalOnlyTheoryAttribute()
+        {
+            if (Dispensers.GetMetaDataInternalInterface == 0)
+            {
+                Skip = "Only run with an internal build of the runtime that exports the internal metadata provider.";
+            }
+        }
+    }
+
+    public sealed class InternalWindowsOnlyTheoryAttribute : TheoryAttribute
+    {
+        public InternalWindowsOnlyTheoryAttribute()
+        {
+            if (Dispensers.GetMetaDataInternalInterface == 0 || RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                Skip = "Only run with an internal build of the runtime that exports the internal metadata provider.";
+            }
+        }
+    }
+
     public unsafe class ImportTests
     {
         private delegate* unmanaged<void*, int, TestResult> _importAPIs;
@@ -369,15 +391,15 @@ namespace Regression.UnitTests
             _findAPIs(block.Pointer, block.Length).Check();
         }
 
-        [Theory]
+        [InternalOnlyTheory]
         [MemberData(nameof(CoreFrameworkLibraries))]
         public void ImportInternalAPIs_Core(string filename, PEReader managedLibrary) => ImportInternalAPIs(filename, managedLibrary);
 
-        [WindowsOnlyTheory]
+        [InternalWindowsOnlyTheory]
         [MemberData(nameof(Net20FrameworkLibraries))]
         public void ImportInternalAPIs_Net20(string filename, PEReader managedLibrary) => ImportInternalAPIs(filename, managedLibrary);
 
-        [WindowsOnlyTheory]
+        [InternalWindowsOnlyTheory]
         [MemberData(nameof(Net40FrameworkLibraries))]
         public void ImportInternalAPIs_Net40(string filename, PEReader managedLibrary) => ImportInternalAPIs(filename, managedLibrary);
 
@@ -394,7 +416,7 @@ namespace Regression.UnitTests
         /// These APIs are very expensive to run on all managed libraries. This library only runs
         /// them on the system corelibs and only on a reduced selection of the tokens.
         /// </summary>
-        [Theory]
+        [InternalOnlyTheory]
         [MemberData(nameof(AllCoreLibs))]
         public void LongRunningInternalAPIs(string filename, PEReader managedLibrary)
         {

@@ -534,49 +534,6 @@ static int32_t col_compare_4bytes(void const* key, void const* row, void* cxt)
     return lhs - rhs;
 }
 
-
-static void const* md_lsearch_2bytes(
-    void const* key,
-    void const* base,
-    rsize_t count,
-    rsize_t element_size,
-    void* cxt)
-{
-    assert(key != NULL && base != NULL);
-    void const* row = base;
-    for (rsize_t i = 0; i < count; ++i)
-    {
-        int32_t res = col_compare_2bytes(key, row, cxt);
-        if (res == 0)
-            return row;
-
-        // Onto the next row.
-        row = (uint8_t const*)row + element_size;
-    }
-    return NULL;
-}
-
-static void const* md_lsearch_4bytes(
-    void const* key,
-    void const* base,
-    rsize_t count,
-    rsize_t element_size,
-    void* cxt)
-{
-    assert(key != NULL && base != NULL);
-    void const* row = base;
-    for (rsize_t i = 0; i < count; ++i)
-    {
-        int32_t res = col_compare_4bytes(key, row, cxt);
-        if (res == 0)
-            return row;
-
-        // Onto the next row.
-        row = (uint8_t const*)row + element_size;
-    }
-    return NULL;
-}
-
 typedef int32_t(*md_bcompare_t)(void const* key, void const* row, void*);
 
 // Define all 2 and 4 byte search functions

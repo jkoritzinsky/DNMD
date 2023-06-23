@@ -46,7 +46,7 @@ namespace Common
                 : OperatingSystem.IsMacOS() ? "libcoreclr.dylib"
                 : "libcoreclr.so";
 
-            var baseline = Path.Combine(@"E:\dnmd-playground\dotnet\shared\Microsoft.NETCore.App\8.0.0", runtimeName);
+            var baseline = Path.Combine(Environment.GetEnvironmentVariable("DNMD_CORECLR_BASELINE") ?? Path.GetDirectoryName(typeof(object).Assembly.Location!)!, runtimeName);
 #endif
 
             return NativeLibrary.Load(baseline);
@@ -70,7 +70,7 @@ namespace Common
 
         private static unsafe nint GetGetMetaDataInternalInterfaceRaw()
         {
-            return NativeLibrary.GetExport(GetBaselineModule(), "GetMetaDataInternalInterface");
+            return NativeLibrary.TryGetExport(GetBaselineModule(), "GetMetaDataInternalInterface", out nint export) ? export : 0;
         }
 
         [SupportedOSPlatform("windows")]
