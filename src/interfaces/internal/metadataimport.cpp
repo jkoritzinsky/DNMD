@@ -68,6 +68,73 @@ namespace
 
         return S_OK;
     }
+    
+
+    HRESULT CreateEnumTokenRangeForSortedTableKey(
+        mdhandle_t mdhandle,
+        mdtable_id_t table,
+        col_index_t keyColumn,
+        mdToken token,
+        HCORENUMImpl* pEnumImpl)
+    {
+        HRESULT hr;
+        mdcursor_t cursor;
+        uint32_t tableCount;
+        if (!md_create_cursor(mdhandle, table, &cursor, &tableCount))
+        {
+            HCORENUMImpl::CreateDynamicEnumInAllocatedMemory(pEnumImpl);
+            return S_OK;
+        }
+        mdcursor_t begin;
+        uint32_t count;
+        md_range_result_t result = md_find_range_from_cursor(cursor, keyColumn, token, &begin, &count);
+
+        if (result == MD_RANGE_NOT_FOUND)
+        {
+            HCORENUMImpl::CreateDynamicEnumInAllocatedMemory(pEnumImpl);
+            return S_OK;
+        }
+        else if (result == MD_RANGE_FOUND)
+        {
+            HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, pEnumImpl);
+            HCORENUMImpl::InitTableEnum(*pEnumImpl, 0, begin, count);
+            return S_OK;
+        }
+        else
+        {
+            // Unsorted so we need to search across the entire table
+            HCORENUMImpl::CreateDynamicEnumInAllocatedMemory(pEnumImpl);
+            HCORENUMImplInPlace_ptr implCleanup{ pEnumImpl };
+            mdcursor_t curr = cursor;
+            uint32_t currCount = tableCount;
+
+            // Read in for matching in bulk
+            mdToken matchedGroup[64];
+            uint32_t i = 0;
+            while (i < currCount)
+            {
+                int32_t read = md_get_column_value_as_token(curr, keyColumn, ARRAY_SIZE(matchedGroup), matchedGroup);
+                if (read == 0)
+                    break;
+
+                assert(read > 0);
+                for (int32_t j = 0; j < read; ++j)
+                {
+                    if (matchedGroup[j] == token)
+                    {
+                        mdToken matchedTk;
+                        if (!md_cursor_to_token(curr, &matchedTk))
+                            return CLDB_E_FILE_CORRUPT;
+                        RETURN_IF_FAILED(HCORENUMImpl::AddToDynamicEnum(*pEnumImpl, matchedTk));
+                    }
+                    (void)md_cursor_next(&curr);
+                }
+                i += read;
+            }
+            implCleanup.release();
+            return S_OK;
+        }
+    }
 }
 
 STDMETHODIMP_(ULONG) InternalMetadataImportRO::GetCountWithTokenKind(
@@ -124,14 +191,7 @@ STDMETHODIMP InternalMetadataImportRO::EnumMethodImplInit(
         return S_OK;
     }
 
-    if (!md_find_range_from_cursor(cursor, mdtMethodImpl_Class, td, &cursor, &count))
-    {
-        HCORENUMImpl::InitTableEnum(*enumBody, 0, cursor, 0);
-        return S_OK;
-    }
-
-    HCORENUMImpl::InitTableEnum(*enumBody, 0, cursor, count);
-    return S_OK;
+    return CreateEnumTokenRangeForSortedTableKey(m_handle.get(), mdtid_MethodImpl, mdtMethodImpl_Class, td, enumBody);
 }
 STDMETHODIMP_(ULONG) InternalMetadataImportRO::EnumMethodImplGetCount(
     HENUMInternal   *phEnumBody,
@@ -256,53 +316,19 @@ STDMETHODIMP InternalMetadataImportRO::EnumInit(
         case mdtGenericParam:
         {
             HCORENUMImpl* impl = ToHCORENUMImpl(phEnum);
-            HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, impl);
 
-            mdcursor_t cursor;
-            uint32_t count;
-            if (!md_create_cursor(m_handle.get(), mdtid_GenericParam, &cursor, &count)
-                || !md_find_range_from_cursor(cursor, mdtGenericParam_Owner, tkParent, &cursor, &count))
-            {
-                HCORENUMImpl::InitTableEnum(*impl, 0, cursor, 0);
-                return S_OK;
-            }
-
-            HCORENUMImpl::InitTableEnum(*impl, 0, cursor, count);
-            return S_OK;
+            return CreateEnumTokenRangeForSortedTableKey(m_handle.get(), mdtid_GenericParam, mdtGenericParam_Owner, tkParent, impl);
         }
         case mdtGenericParamConstraint:
         {
             HCORENUMImpl* impl = ToHCORENUMImpl(phEnum);
-            HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, impl);
 
-            mdcursor_t cursor;
-            uint32_t count;
-            if (!md_create_cursor(m_handle.get(), mdtid_GenericParamConstraint, &cursor, &count)
-                || !md_find_range_from_cursor(cursor, mdtGenericParamConstraint_Owner, tkParent, &cursor, &count))
-            {
-                HCORENUMImpl::InitTableEnum(*impl, 0, cursor, 0);
-                return S_OK;
-            }
-
-            HCORENUMImpl::InitTableEnum(*impl, 0, cursor, count);
-            return S_OK;
+            return CreateEnumTokenRangeForSortedTableKey(m_handle.get(), mdtid_GenericParamConstraint, mdtGenericParamConstraint_Owner, tkParent, impl);
         }
         case mdtInterfaceImpl:
         {
             HCORENUMImpl* impl = ToHCORENUMImpl(phEnum);
-            HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, impl);
-
-            mdcursor_t cursor;
-            uint32_t count;
-            if (!md_create_cursor(m_handle.get(), mdtid_InterfaceImpl, &cursor, &count)
-                || !md_find_range_from_cursor(cursor, mdtInterfaceImpl_Class, tkParent, &cursor, &count))
-            {
-                HCORENUMImpl::InitTableEnum(*impl, 0, cursor, 0);
-                return S_OK;
-            }
-
-            HCORENUMImpl::InitTableEnum(*impl, 0, cursor, count);
-            return S_OK;
+            return CreateEnumTokenRangeForSortedTableKey(m_handle.get(), mdtid_InterfaceImpl, mdtInterfaceImpl_Class, tkParent, impl);
         }
         case mdtProperty:
         {
@@ -369,19 +395,7 @@ STDMETHODIMP InternalMetadataImportRO::EnumInit(
         case mdtCustomAttribute:
         {
             HCORENUMImpl* impl = ToHCORENUMImpl(phEnum);
-            HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, impl);
-
-            mdcursor_t cursor;
-            uint32_t count;
-            if (!md_create_cursor(m_handle.get(), mdtid_CustomAttribute, &cursor, &count)
-                || !md_find_range_from_cursor(cursor, mdtCustomAttribute_Parent, tkParent, &cursor, &count))
-            {
-                HCORENUMImpl::InitTableEnum(*impl, 0, cursor, 0);
-                return S_OK;
-            }
-
-            HCORENUMImpl::InitTableEnum(*impl, 0, cursor, count);
-            return S_OK;
+            return CreateEnumTokenRangeForSortedTableKey(m_handle.get(), mdtid_CustomAttribute, mdtCustomAttribute_Parent, tkParent, impl);
         }
         case mdtAssemblyRef:
         case mdtFile:
@@ -460,8 +474,11 @@ STDMETHODIMP InternalMetadataImportRO::EnumCustomAttributeByNameInit(
 
     mdcursor_t attributes;
     uint32_t numAttributes;
-    if (!md_find_range_from_cursor(cursor, mdtCustomAttribute_Parent, tkParent, &attributes, &numAttributes))
+    md_range_result_t result = md_find_range_from_cursor(cursor, mdtCustomAttribute_Parent, tkParent, &attributes, &numAttributes);
+    if (result == MD_RANGE_NOT_FOUND)
         return S_OK;
+
+    assert(result != MD_RANGE_NOT_SUPPORTED); // TODO: Support unordered CustomAttribute table in the internal API
 
     HCORENUMImplInPlace_ptr implCleanup{ impl };
     for (uint32_t i = 0; i < numAttributes; i++, md_cursor_next(&attributes))
@@ -892,8 +909,14 @@ STDMETHODIMP InternalMetadataImportRO::GetCountNestedClasses(
     uint32_t count;
     mdcursor_t nestedClassRowStart;
     uint32_t nestedClassRowCount;
-    if (!md_create_cursor(m_handle.get(), mdtid_NestedClass, &cursor, &count)
-        || !md_find_range_from_cursor(cursor, mdtNestedClass_EnclosingClass, RidFromToken(tkEnclosingClass), &nestedClassRowStart, &nestedClassRowCount))
+    if (!md_create_cursor(m_handle.get(), mdtid_NestedClass, &cursor, &count))
+    {
+        return CLDB_E_RECORD_NOTFOUND;
+    }
+
+    md_range_result_t result = md_find_range_from_cursor(cursor, mdtNestedClass_EnclosingClass, RidFromToken(tkEnclosingClass), &nestedClassRowStart, &nestedClassRowCount);
+    assert(result != MD_RANGE_NOT_SUPPORTED);
+    if (result == MD_RANGE_NOT_FOUND)
     {
         return CLDB_E_RECORD_NOTFOUND;
     }
@@ -915,8 +938,14 @@ STDMETHODIMP InternalMetadataImportRO::GetNestedClasses(
     uint32_t count;
     mdcursor_t nestedClassRowStart;
     uint32_t nestedClassRowCount;
-    if (!md_create_cursor(m_handle.get(), mdtid_NestedClass, &cursor, &count)
-        || !md_find_range_from_cursor(cursor, mdtNestedClass_EnclosingClass, RidFromToken(tkEnclosingClass), &nestedClassRowStart, &nestedClassRowCount))
+    if (!md_create_cursor(m_handle.get(), mdtid_NestedClass, &cursor, &count))
+    {
+        return CLDB_E_RECORD_NOTFOUND;
+    }
+
+    md_range_result_t result = md_find_range_from_cursor(cursor, mdtNestedClass_EnclosingClass, RidFromToken(tkEnclosingClass), &nestedClassRowStart, &nestedClassRowCount);
+    assert(result != MD_RANGE_NOT_SUPPORTED);
+    if (result == MD_RANGE_NOT_FOUND)
     {
         return CLDB_E_RECORD_NOTFOUND;
     }
@@ -1846,7 +1875,9 @@ STDMETHODIMP InternalMetadataImportRO::FindAssociate(
         return CLDB_E_FILE_CORRUPT;
     
     uint32_t numAssociatedMethods;
-    if (!md_find_range_from_cursor(c, mdtMethodSemantics_Association, evprop, &c, &numAssociatedMethods))
+    md_range_result_t result = md_find_range_from_cursor(c, mdtMethodSemantics_Association, evprop, &c, &numAssociatedMethods);
+    assert(result != MD_RANGE_NOT_SUPPORTED);
+    if (result == MD_RANGE_NOT_FOUND)
         return CLDB_E_RECORD_NOTFOUND;
     
     for (uint32_t i = 0; i < numAssociatedMethods; i++, md_cursor_next(&c))
@@ -1870,20 +1901,8 @@ STDMETHODIMP InternalMetadataImportRO::EnumAssociateInit(
     mdToken     evprop,
     HENUMInternal *phEnum)
 {
-    mdcursor_t c;
-    uint32_t count;
     HCORENUMImpl* impl = ToHCORENUMImpl(phEnum);
-    uint32_t numAssociatedMethods;
-    HCORENUMImpl::CreateTableEnumInAllocatedMemory(1, impl);
-    if (!md_create_cursor(m_handle.get(), mdtid_MethodSemantics, &c, &count)
-        || !md_find_range_from_cursor(c, mdtMethodSemantics_Association, evprop, &c, &numAssociatedMethods))
-    {
-        HCORENUMImpl::InitTableEnum(*impl, 0, c, 0);
-        return S_OK;
-    }
-
-    HCORENUMImpl::InitTableEnum(*impl, 0, c, numAssociatedMethods);
-    return S_OK;
+    return CreateEnumTokenRangeForSortedTableKey(m_handle.get(), mdtid_MethodSemantics, mdtMethodSemantics_Association, evprop, impl);
 }
 
 STDMETHODIMP InternalMetadataImportRO::GetAllAssociates(
@@ -2515,7 +2534,9 @@ STDMETHODIMP InternalMetadataImportRO::GetCustomAttributeByName(
 
     mdcursor_t custAttrCurr;
     uint32_t custAttrCount;
-    if (!md_find_range_from_cursor(cursor, mdtCustomAttribute_Parent, tkObj, &custAttrCurr, &custAttrCount))
+    md_range_result_t result = md_find_range_from_cursor(cursor, mdtCustomAttribute_Parent, tkObj, &custAttrCurr, &custAttrCount);
+    assert(result != MD_RANGE_NOT_SUPPORTED);
+    if (result == MD_RANGE_NOT_FOUND)
     {
         if (ppData != nullptr)
         {
