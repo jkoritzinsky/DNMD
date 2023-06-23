@@ -478,7 +478,13 @@ STDMETHODIMP InternalMetadataImportRO::EnumCustomAttributeByNameInit(
     if (result == MD_RANGE_NOT_FOUND)
         return S_OK;
 
-    assert(result != MD_RANGE_NOT_SUPPORTED); // TODO: Support unordered CustomAttribute table in the internal API
+    bool checkParent = false;
+    if (result == MD_RANGE_NOT_SUPPORTED)
+    {
+        attributes = cursor;
+        numAttributes = count;
+        checkParent = true;
+    }
 
     HCORENUMImplInPlace_ptr implCleanup{ impl };
     for (uint32_t i = 0; i < numAttributes; i++, md_cursor_next(&attributes))
@@ -486,6 +492,17 @@ STDMETHODIMP InternalMetadataImportRO::EnumCustomAttributeByNameInit(
         mdToken caToken;
         if (!md_cursor_to_token(attributes, &caToken))
             return CLDB_E_FILE_CORRUPT;
+        
+        if (checkParent)
+        {
+            mdToken parent;
+            if (1 != md_get_column_value_as_token(attributes, mdtCustomAttribute_Parent, 1, &parent))
+                return CLDB_E_FILE_CORRUPT;
+
+            if (parent != tkParent)
+                continue;
+        }
+
         LPCSTR pNamespace;
         LPCSTR pName;
         RETURN_IF_FAILED(GetNameOfCustomAttribute(caToken, &pNamespace, &pName));
@@ -618,9 +635,11 @@ STDMETHODIMP InternalMetadataImportRO::FindParamOfMethod(
     if (!md_get_column_value_as_range(method, mdtMethodDef_ParamList, &paramList, &count))
         return CLDB_E_FILE_CORRUPT;
 
-    mdcursor_t param = paramList;
-    for (size_t i = 0; i < count; i++, md_cursor_next(&param))
+    for (size_t i = 0; i < count; i++, md_cursor_next(&paramList))
     {
+        mdcursor_t param;
+        if (!md_resolve_indirect_cursor(paramList, &param))
+            return CLDB_E_FILE_CORRUPT;
         uint32_t seq;
         if (1 != md_get_column_value_as_constant(param, mdtParam_Sequence, 1, &seq))
             return CLDB_E_FILE_CORRUPT;
@@ -915,10 +934,23 @@ STDMETHODIMP InternalMetadataImportRO::GetCountNestedClasses(
     }
 
     md_range_result_t result = md_find_range_from_cursor(cursor, mdtNestedClass_EnclosingClass, RidFromToken(tkEnclosingClass), &nestedClassRowStart, &nestedClassRowCount);
-    assert(result != MD_RANGE_NOT_SUPPORTED);
     if (result == MD_RANGE_NOT_FOUND)
     {
         return CLDB_E_RECORD_NOTFOUND;
+    }
+    else if (result == MD_RANGE_NOT_SUPPORTED)
+    {
+        nestedClassRowCount = 0;
+        for (uint32_t i = 0; i < count; i++, md_cursor_next(&cursor))
+        {
+            mdToken enclosingClass;
+            if (1 != md_get_column_value_as_token(cursor, mdtNestedClass_EnclosingClass, 1, &enclosingClass))
+                return CLDB_E_FILE_CORRUPT;
+            
+            if (enclosingClass == tkEnclosingClass)
+                nestedClassRowCount++;
+        }
+        
     }
 
     *pcNestedClassesCount = nestedClassRowCount;
@@ -944,10 +976,31 @@ STDMETHODIMP InternalMetadataImportRO::GetNestedClasses(
     }
 
     md_range_result_t result = md_find_range_from_cursor(cursor, mdtNestedClass_EnclosingClass, RidFromToken(tkEnclosingClass), &nestedClassRowStart, &nestedClassRowCount);
-    assert(result != MD_RANGE_NOT_SUPPORTED);
     if (result == MD_RANGE_NOT_FOUND)
     {
         return CLDB_E_RECORD_NOTFOUND;
+    }
+    else if (result == MD_RANGE_NOT_SUPPORTED)
+    {
+        nestedClassRowCount = 0;
+        for (uint32_t i = 0; i < count; i++, md_cursor_next(&cursor))
+        {
+            mdToken enclosingClass;
+            if (1 != md_get_column_value_as_token(cursor, mdtNestedClass_EnclosingClass, 1, &enclosingClass))
+                return CLDB_E_FILE_CORRUPT;
+            
+            if (enclosingClass == tkEnclosingClass)
+            {
+                if (1 != md_get_column_value_as_token(cursor, mdtNestedClass_NestedClass, 1, &rNestedClasses[nestedClassRowCount++]))
+                    return CLDB_E_FILE_CORRUPT;
+                
+                if (nestedClassRowCount == ulNestedClasses)
+                    break;
+            }
+        }
+
+        *pcNestedClasses = nestedClassRowCount;
+        return S_OK;
     }
 
     int32_t numReadRows = md_get_column_value_as_token(nestedClassRowStart, mdtNestedClass_NestedClass, std::min((uint32_t)ulNestedClasses, nestedClassRowCount), rNestedClasses);
@@ -1678,18 +1731,24 @@ STDMETHODIMP InternalMetadataImportRO::GetClassLayoutNext(
 
     for (; pLayout->m_ridFieldCur < pLayout->m_ridFieldEnd; pLayout->m_ridFieldCur++)
     {
-        mdFieldDef token = TokenFromRid(pLayout->m_ridFieldCur, mdtFieldDef);
         mdcursor_t field;
-        if (!md_token_to_cursor(m_handle.get(), token, &field))
+        if (!md_token_to_cursor(m_handle.get(), TokenFromRid(pLayout->m_ridFieldCur, (mdtid_FieldPtr << 24)), &field)
+            && !md_token_to_cursor(m_handle.get(), TokenFromRid(pLayout->m_ridFieldCur, mdtFieldDef), &field))
             return CLDB_E_FILE_CORRUPT;
         
+        if (!md_resolve_indirect_cursor(field, &field))
+            return CLDB_E_FILE_CORRUPT;
+
         if (md_find_row_from_cursor(fieldLayout, mdtFieldLayout_Field, pLayout->m_ridFieldCur, &fieldLayout))
         {
             uint32_t offset;
             if (1 != md_get_column_value_as_constant(fieldLayout, mdtFieldLayout_Offset, 1, &offset))
                 return CLDB_E_FILE_CORRUPT;
-            *pfd = token;
             *pulOffset = offset;
+            
+            if (!md_cursor_to_token(field, pfd))
+                return CLDB_E_FILE_CORRUPT;
+
             pLayout->m_ridFieldCur++;
             return S_OK;
         }
@@ -1744,13 +1803,17 @@ STDMETHODIMP InternalMetadataImportRO::FindProperty(
 
     for (uint32_t i = 0; i < numProperties; i++, md_cursor_next(&property))
     {
+        mdcursor_t prop;
+        if (!md_resolve_indirect_cursor(property, &prop))
+            return CLDB_E_FILE_CORRUPT;
+
         LPCSTR name;
-        if (1 != md_get_column_value_as_utf8(property, mdtProperty_Name, 1, &name))
+        if (1 != md_get_column_value_as_utf8(prop, mdtProperty_Name, 1, &name))
             return CLDB_E_FILE_CORRUPT;
         
         if (strcmp(name, szPropName) == 0)
         {
-            if (!md_cursor_to_token(property, pProp))
+            if (!md_cursor_to_token(prop, pProp))
                 return CLDB_E_FILE_CORRUPT;
 
             return S_OK;
@@ -1820,13 +1883,17 @@ STDMETHODIMP InternalMetadataImportRO::FindEvent(
     
     for (uint32_t i = 0; i < numEvents; i++, md_cursor_next(&event))
     {
+        mdcursor_t evt;
+        if (!md_resolve_indirect_cursor(event, &evt))
+            return CLDB_E_FILE_CORRUPT;
+
         LPCSTR name;
-        if (1 != md_get_column_value_as_utf8(event, mdtEvent_Name, 1, &name))
+        if (1 != md_get_column_value_as_utf8(evt, mdtEvent_Name, 1, &name))
             return CLDB_E_FILE_CORRUPT;
         
         if (strcmp(name, szEventName) == 0)
         {
-            if (!md_cursor_to_token(event, pEvent))
+            if (!md_cursor_to_token(evt, pEvent))
                 return CLDB_E_FILE_CORRUPT;
 
             return S_OK;
@@ -1879,9 +1946,21 @@ STDMETHODIMP InternalMetadataImportRO::FindAssociate(
     assert(result != MD_RANGE_NOT_SUPPORTED);
     if (result == MD_RANGE_NOT_FOUND)
         return CLDB_E_RECORD_NOTFOUND;
+
+    bool checkParent = result == MD_RANGE_NOT_SUPPORTED;
     
     for (uint32_t i = 0; i < numAssociatedMethods; i++, md_cursor_next(&c))
     {
+        if (checkParent)
+        {
+            mdToken parent;
+            if (1 != md_get_column_value_as_token(c, mdtMethodSemantics_Association, 1, &parent))
+                return CLDB_E_FILE_CORRUPT;
+            
+            if (parent != evprop)
+                continue;
+        }
+
         uint32_t semantics;
         if (1 != md_get_column_value_as_constant(c, mdtMethodSemantics_Semantics, 1, &semantics))
             return CLDB_E_FILE_CORRUPT;
@@ -2550,6 +2629,7 @@ STDMETHODIMP InternalMetadataImportRO::GetCustomAttributeByName(
     char const* nspace;
     char const* name;
 
+    bool checkParent = result == MD_RANGE_NOT_SUPPORTED;
     mdcursor_t type;
     mdcursor_t tgtType;
     mdToken typeTk;
@@ -2557,6 +2637,16 @@ STDMETHODIMP InternalMetadataImportRO::GetCustomAttributeByName(
     char const* curr;
     for (uint32_t i = 0; i < custAttrCount; (void)md_cursor_next(&custAttrCurr), ++i)
     {
+        if (checkParent)
+        {
+            mdToken parent;
+            if (1 != md_get_column_value_as_token(custAttrCurr, mdtCustomAttribute_Parent, 1, &parent))
+                return CLDB_E_FILE_CORRUPT;
+            
+            if (parent != tkObj)
+                continue;
+        }
+
         if (1 != md_get_column_value_as_cursor(custAttrCurr, mdtCustomAttribute_Type, 1, &type))
             return CLDB_E_FILE_CORRUPT;
 
@@ -2768,8 +2858,11 @@ STDMETHODIMP InternalMetadataImportRO::FindMethodDefUsingCompare(
 
     for (uint32_t i = 0; i < count; (void)md_cursor_next(&methodCursor), ++i)
     {
+        mdcursor_t method;
+        if (!md_resolve_indirect_cursor(methodCursor, &method))
+            return CLDB_E_FILE_CORRUPT;
         uint32_t flags;
-        if (1 != md_get_column_value_as_constant(methodCursor, mdtMethodDef_Flags, 1, &flags))
+        if (1 != md_get_column_value_as_constant(method, mdtMethodDef_Flags, 1, &flags))
             return CLDB_E_FILE_CORRUPT;
 
         // Ignore PrivateScope methods. By the spec, they can only be referred to by a MethodDef token
@@ -2778,7 +2871,7 @@ STDMETHODIMP InternalMetadataImportRO::FindMethodDefUsingCompare(
             continue;
 
         char const* methodName;
-        if (1 != md_get_column_value_as_utf8(methodCursor, mdtMethodDef_Name, 1, &methodName))
+        if (1 != md_get_column_value_as_utf8(method, mdtMethodDef_Name, 1, &methodName))
             return CLDB_E_FILE_CORRUPT;
         if (::strcmp(methodName, szName) != 0)
             continue;
@@ -2787,7 +2880,7 @@ STDMETHODIMP InternalMetadataImportRO::FindMethodDefUsingCompare(
         {
             uint8_t const* sig;
             uint32_t sigLen;
-            if (1 != md_get_column_value_as_blob(methodCursor, mdtMethodDef_Signature, 1, &sig, &sigLen))
+            if (1 != md_get_column_value_as_blob(method, mdtMethodDef_Signature, 1, &sig, &sigLen))
                 return CLDB_E_FILE_CORRUPT;
             if (sigLen != defSigLen
                 || (pSignatureCompare(sig, sigLen, methodDefSig.get(), (uint32_t)defSigLen, pSignatureArgs) == FALSE))
@@ -2795,7 +2888,7 @@ STDMETHODIMP InternalMetadataImportRO::FindMethodDefUsingCompare(
                 continue;
             }
         }
-        if (!md_cursor_to_token(methodCursor, pmd))
+        if (!md_cursor_to_token(method, pmd))
             return CLDB_E_FILE_CORRUPT;
         return S_OK;
     }
