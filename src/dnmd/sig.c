@@ -626,6 +626,370 @@ static bool import_sig_element(
     return false;
 }
 
+typedef struct nested_type_chain__
+{
+    mdcursor_t type;
+    struct nested_type_chain__* nested_type;
+} nested_type_chain_t;
+
+static nested_type_chain_t* add_enclosing_type_to_chain(nested_type_chain_t* chain, mdcursor_t type)
+{
+    nested_type_chain_t* new_chain = malloc(sizeof(nested_type_chain_t));
+    if (new_chain == NULL)
+        return NULL;
+    
+    new_chain->type = type;
+    new_chain->nested_type = chain;
+    return new_chain;
+}
+
+static void free_nested_type_chain(nested_type_chain_t* chain)
+{
+    if (chain == NULL)
+        return;
+    
+    free_nested_type_chain(chain->nested_type);
+    free(chain);
+}
+
+bool get_mvid(mdcxt_t* cxt, mdguid_t* mvid)
+{
+    assert(mvid != NULL);
+    mdcursor_t c;
+    uint32_t count;
+    if (!md_create_cursor(cxt, mdtid_Module, &c, &count))
+        return false;
+
+    return 1 != md_get_column_value_as_guid(c, mdtModule_Mvid, 1, mvid);
+}
+
+static bool import_typedef(
+    mdcxt_t* source_assembly_cxt,
+    mdcxt_t* source_module_cxt,
+    mdcxt_t* destination_assembly_cxt,
+    mdcxt_t* destination_module_cxt,
+    uint8_t const* source_assembly_hash,
+    uint32_t source_assembly_hash_length,
+    bool resolve_existing_token,
+    mdToken* token
+)
+{
+    mdguid_t destination_module_mvid;
+    mdguid_t destination_assembly_mvid;
+    mdguid_t source_assembly_mvid;
+    mdguid_t source_module_mvid;
+    if (!get_mvid(destination_module_cxt, &destination_module_mvid))
+        return false;
+    if (!get_mvid(destination_assembly_cxt, &destination_assembly_mvid))
+        return false;
+    if (!get_mvid(source_assembly_cxt, &source_assembly_mvid))
+        return false;
+    if (!get_mvid(source_module_cxt, &source_module_mvid))
+        return false;
+
+    bool same_module_mvid = memcmp(&destination_module_mvid, &source_module_mvid, sizeof(mdguid_t)) == 0;
+    bool same_assembly_mvid = memcmp(&destination_assembly_mvid, &source_assembly_mvid, sizeof(mdguid_t)) == 0;
+
+    mdcursor_t resolution_scope;
+    if (same_assembly_mvid && same_module_mvid)
+    {
+        // If we should resolve an existing token to itself, then we're done here.
+        if (resolve_existing_token)
+            return true;
+
+        uint32_t count;
+        if (!md_create_cursor(destination_module_cxt, mdtid_Module, &resolution_scope, &count))
+            return false;
+    }
+    else if (same_assembly_mvid && !same_module_mvid)
+    {
+        char const* import_name;
+        mdcursor_t import_module;
+        uint32_t count;
+        if (!md_create_cursor(source_module_cxt, mdtid_Module, &import_module, &count)
+            || 1 != md_get_column_value_as_utf8(import_module, mdtModule_Name, 1, &import_name))
+        {
+            return false;
+        }
+
+        mdcursor_t module_ref;
+        if (!md_append_row(destination_module_cxt, mdtid_ModuleRef, &module_ref))
+        {
+            return false;
+        }
+
+        md_commit_row_add(module_ref);
+
+        if (1 != md_set_column_value_as_utf8(module_ref, mdtModuleRef_Name, 1, &import_name))
+        {
+            return false;
+        }
+
+        resolution_scope = module_ref;
+    }
+    else if (same_module_mvid)
+    {
+        // The import can't be the same module and different assemblies.
+        return false;
+    }
+    else
+    {
+        // TODO: Create assembly ref
+        mdcursor_t source_assembly;
+        uint32_t count;
+        if (!md_create_cursor(source_module_cxt, mdtid_Assembly, &source_assembly, &count))
+            return false;
+        
+        uint32_t flags;
+        if (1 != md_get_column_value_as_constant(source_assembly, mdtAssembly_Flags, 1, &flags))
+            return false;
+
+        uint8_t const* public_key;
+        uint32_t public_key_length;
+        if (1 != md_get_column_value_as_blob(source_assembly, mdtAssembly_PublicKey, 1, &public_key, &public_key_length))
+            return false;
+        
+        if (public_key != NULL)
+        {
+            assert(IsAfPublicKey(flags));
+            flags &= ~afPublicKey;
+            // TODO: Generate token from public key.
+        }
+        else
+        {
+            assert(!IsAfPublicKey(flags));
+        }
+
+        mdcursor_t assembly_ref;
+        if (!md_append_row(destination_module_cxt, mdtid_AssemblyRef, &assembly_ref))
+            return false;
+        
+        md_commit_row_add(assembly_ref);
+
+        uint32_t temp;
+        if (1 != md_get_column_value_as_constant(source_assembly, mdtAssembly_MajorVersion, 1, &temp)
+            || 1 != md_set_column_value_as_constant(assembly_ref, mdtAssemblyRef_MajorVersion, 1, &temp))
+        {
+            return false;
+        }
+
+        if (1 != md_get_column_value_as_constant(source_assembly, mdtAssembly_MinorVersion, 1, &temp)
+            || 1 != md_set_column_value_as_constant(assembly_ref, mdtAssemblyRef_MinorVersion, 1, &temp))
+        {
+            return false;
+        }
+
+        if (1 != md_get_column_value_as_constant(source_assembly, mdtAssembly_BuildNumber, 1, &temp)
+            || 1 != md_set_column_value_as_constant(assembly_ref, mdtAssemblyRef_BuildNumber, 1, &temp))
+        {
+            return false;
+        }
+
+        if (1 != md_get_column_value_as_constant(source_assembly, mdtAssembly_RevisionNumber, 1, &temp)
+            || 1 != md_set_column_value_as_constant(assembly_ref, mdtAssemblyRef_RevisionNumber, 1, &temp))
+        {
+            return false;
+        }
+        
+        // TODO: Public Key/Token and Flags
+        if (1 != md_set_column_value_as_constant(assembly_ref, mdtAssemblyRef_Flags, 1, &flags))
+            return false;
+        
+        char const* assemblyName;
+        if (1 != md_get_column_value_as_utf8(source_assembly, mdtAssembly_Name, 1, &assemblyName)
+            || 1 != md_set_column_value_as_utf8(assembly_ref, mdtAssemblyRef_Name, 1, &assemblyName))
+        {
+            return false;
+        }
+
+        char const* assemblyCulture;
+        if (1 != md_get_column_value_as_utf8(source_assembly, mdtAssembly_Culture, 1, &assemblyCulture)
+            || 1 != md_set_column_value_as_utf8(assembly_ref, mdtAssemblyRef_Culture, 1, &assemblyCulture))
+        {
+            return false;
+        }
+
+        if (1 != md_set_column_value_as_blob(assembly_ref, mdtAssemblyRef_HashValue, 1, &source_assembly_hash, &source_assembly_hash_length))
+            return false;
+        
+        resolution_scope = assembly_ref;
+    }
+
+    nested_type_chain_t* nested_type_chain = NULL;
+
+    mdcursor_t importType;
+    if (!md_token_to_cursor(source_module_cxt, tdImport, &importType))
+        return false;
+    
+    nested_type_chain = add_enclosing_type_to_chain(&nested_type_chain, importType);
+    
+    mdcursor_t nestedClasses;
+    uint32_t nestedClassCount;
+    if (!md_create_cursor(source_module_cxt, mdtid_NestedClass, &nestedClasses, &nestedClassCount))
+    {
+        free_nested_type_chain(nested_type_chain);
+        return false;
+    }
+    
+    mdToken nestedTypeToken = tdImport;
+    mdcursor_t nestedClass;
+    while (md_find_row_from_cursor(nestedClasses, mdtNestedClass_NestedClass, RidFromToken(nestedTypeToken), &nestedClass))
+    {
+        mdcursor_t enclosingClass;
+        if (1 != md_get_column_value_as_cursor(nestedClass, mdtNestedClass_EnclosingClass, 1, &enclosingClass))
+        {
+            free_nested_type_chain(nested_type_chain);
+            return false;
+        }
+        
+        nested_type_chain = add_enclosing_type_to_chain(&nested_type_chain, enclosingClass);
+        if (!md_cursor_to_token(enclosingClass, &nestedTypeToken))
+        {
+            free_nested_type_chain(nested_type_chain);
+            return false;
+        }
+    }
+
+    for (nested_type_chain_t* current_type = nested_type_chain; current_type != NULL; current_type = current_type->nested_type)
+    {
+        mdcursor_t type_def = current_type->type;
+        mdcursor_t type_ref;
+        if (!md_append_row(destination_module_cxt, mdtid_TypeRef, &type_ref))
+        {
+            free_nested_type_chain(nested_type_chain);
+            return false;
+        }
+        
+        md_commit_row_add(type_ref);
+        
+        if (1 != md_set_column_value_as_cursor(type_ref, mdtTypeRef_ResolutionScope, 1, &resolution_scope))
+        {
+            free_nested_type_chain(nested_type_chain);
+            return false;
+        }
+        
+        char const* type_name;
+        if (1 != md_get_column_value_as_utf8(type_def, mdtTypeDef_TypeName, 1, &type_name)
+            || 1 != md_set_column_value_as_utf8(type_ref, mdtTypeRef_TypeName, 1, &type_name))
+        {
+            free_nested_type_chain(nested_type_chain);
+            return false;
+        }
+        
+        char const* type_namespace;
+        if (1 != md_get_column_value_as_utf8(type_def, mdtTypeDef_TypeNamespace, 1, &type_namespace)
+            || 1 != md_set_column_value_as_utf8(type_ref, mdtTypeRef_TypeNamespace, 1, &type_namespace))
+        {
+            free_nested_type_chain(nested_type_chain);
+            return false;
+        }
+
+        resolution_scope = type_ref;
+    }
+
+    free_nested_type_chain(nested_type_chain);
+    return md_cursor_to_token(resolution_scope, token);
+}
+
+static bool import_typespec(
+    mdcxt_t* source_assembly_cxt,
+    mdcxt_t* source_module_cxt,
+    mdcxt_t* destination_assembly_cxt,
+    mdcxt_t* destination_module_cxt,
+    mdTypeSpec* token)
+{
+    // Import the signature of the TypeSpec from the source module and assembly into the destination module and assembly.
+    mdcursor_t source_typespec;
+    if (!md_token_to_cursor(source_module_cxt, *token, &source_typespec))
+        return false;
+    uint8_t const* type_spec_sig;
+    uint32_t type_spec_sig_len;
+    if (1 != md_get_column_value_as_blob(source_typespec, mdtTypeSpec_Signature, 1, &type_spec_sig, &type_spec_sig_len))
+        return false;
+    
+    size_t imported_type_spec_sig_buffer_len = type_spec_sig_len;
+    uint8_t* imported_type_spec_sig = malloc(imported_type_spec_sig_buffer_len);
+    if (imported_type_spec_sig == NULL)
+        return false;
+    
+    size_t remaining_imported_type_spec_sig_length = type_spec_sig_len;
+    if (!import_sig_element(
+        source_assembly_cxt,
+        source_module_cxt,
+        destination_assembly_cxt,
+        destination_module_cxt,
+        &type_spec_sig,
+        &imported_type_spec_sig_buffer_len,
+        &imported_type_spec_sig,
+        &imported_type_spec_sig_buffer_len,
+        &remaining_imported_type_spec_sig_length))
+    {
+        free(imported_type_spec_sig);
+        return false;
+    }
+    
+    uint32_t imported_type_spec_sig_len = (uint32_t)(imported_type_spec_sig_buffer_len - remaining_imported_type_spec_sig_length);
+    imported_type_spec_sig = imported_type_spec_sig - imported_type_spec_sig_len; // Move back to the start of the buffer.
+
+    // Check if a TypeSpec with the same signature already exists in the destination module.
+    mdcursor_t destination_typespec;
+    uint32_t count;
+    if (!md_create_cursor(destination_module_cxt, mdtid_TypeSpec, &destination_typespec, &count))
+    {
+        free(imported_type_spec_sig);
+        return false;
+    }
+
+    bool found = false;
+    for (uint32_t i = 0; i < count; ++i, md_cursor_next(&destination_typespec))
+    {
+        uint8_t const* destination_type_spec_sig;
+        uint32_t destination_type_spec_sig_len;
+        if (1 != md_get_column_value_as_blob(destination_typespec, mdtTypeSpec_Signature, 1, &destination_type_spec_sig, &destination_type_spec_sig_len))
+        {
+            free(imported_type_spec_sig);
+            return false;
+        }
+
+        if (destination_type_spec_sig_len == imported_type_spec_sig_len && memcmp(destination_type_spec_sig, imported_type_spec_sig, destination_type_spec_sig_len) == 0)
+        {
+            found = true;
+            break;
+        }
+    }
+
+    if (found)
+    {
+        // If we found the TypeSpec, we can just use the existing token.
+        free(imported_type_spec_sig);
+        return md_cursor_to_token(destination_typespec, token);
+    }
+    
+    // If we didn't find the TypeSpec, we need to create a new one.
+    mdcursor_t new_typespec;
+    if (!md_append_row(destination_module_cxt, mdtid_TypeSpec, &new_typespec))
+    {
+        free(imported_type_spec_sig);
+        return false;
+    }
+    
+    // The TypeSpec table is unsorted, so we can commit the row-add here.
+    md_commit_row_add(new_typespec);
+
+    // Set the signature of the new TypeSpec.
+    if (!md_set_column_value_as_blob(new_typespec, mdtTypeSpec_Signature, 1, &imported_type_spec_sig, &imported_type_spec_sig_len))
+    {
+        free(imported_type_spec_sig);
+        return false;
+    }
+
+    // Now that we've set the column value, we can free our signature buffer.
+    free(imported_type_spec_sig);
+
+    // Update the token to the new TypeSpec token.
+    return md_cursor_to_token(new_typespec, token);
+}
+
 static bool import_token(
     mdcxt_t* source_assembly_cxt,
     mdcxt_t* source_module_cxt,
@@ -636,110 +1000,69 @@ static bool import_token(
     switch (ExtractTokenType(*token))
     {
         case mdtid_TypeDef:
-            // TODO: Implement TypeDef import
-            break;
+            return import_typedef(
+                source_assembly_cxt,
+                source_module_cxt,
+                destination_assembly_cxt,
+                destination_module_cxt,
+                true,
+                token);
         case mdtid_TypeRef:
             // TODO: Implement TypeRef import
             break;
         case mdtid_TypeSpec:
-            {
-                // Import the signature of the TypeSpec from the source module and assembly into the destination module and assembly.
-                mdcursor_t source_typespec;
-                if (!md_token_to_cursor(source_module_cxt, *token, &source_typespec))
-                    return false;
-                uint8_t const* type_spec_sig;
-                uint32_t type_spec_sig_len;
-                if (1 != md_get_column_value_as_blob(source_typespec, mdtTypeSpec_Signature, 1, &type_spec_sig, &type_spec_sig_len))
-                    return false;
-                
-                size_t imported_type_spec_sig_buffer_len = type_spec_sig_len;
-                uint8_t* imported_type_spec_sig = malloc(imported_type_spec_sig_buffer_len);
-                if (imported_type_spec_sig == NULL)
-                    return false;
-                
-                size_t remaining_imported_type_spec_sig_length = type_spec_sig_len;
-                if (!import_sig_element(
-                    source_assembly_cxt,
-                    source_module_cxt,
-                    destination_assembly_cxt,
-                    destination_module_cxt,
-                    &type_spec_sig,
-                    &imported_type_spec_sig_buffer_len,
-                    &imported_type_spec_sig,
-                    &imported_type_spec_sig_buffer_len,
-                    &remaining_imported_type_spec_sig_length))
-                {
-                    free(imported_type_spec_sig);
-                    return false;
-                }
-                
-                uint32_t imported_type_spec_sig_len = (uint32_t)(imported_type_spec_sig_buffer_len - remaining_imported_type_spec_sig_length);
-                imported_type_spec_sig = imported_type_spec_sig - imported_type_spec_sig_len; // Move back to the start of the buffer.
-
-                // Check if a TypeSpec with the same signature already exists in the destination module.
-                mdcursor_t destination_typespec;
-                uint32_t count;
-                if (!md_create_cursor(destination_module_cxt, mdtid_TypeSpec, &destination_typespec, &count))
-                {
-                    free(imported_type_spec_sig);
-                    return false;
-                }
-
-                bool found = false;
-                for (uint32_t i = 0; i < count; ++i, md_cursor_next(&destination_typespec))
-                {
-                    uint8_t const* destination_type_spec_sig;
-                    uint32_t destination_type_spec_sig_len;
-                    if (1 != md_get_column_value_as_blob(destination_typespec, mdtTypeSpec_Signature, 1, &destination_type_spec_sig, &destination_type_spec_sig_len))
-                    {
-                        free(imported_type_spec_sig);
-                        return false;
-                    }
-
-                    if (destination_type_spec_sig_len == imported_type_spec_sig_len && memcmp(destination_type_spec_sig, imported_type_spec_sig, destination_type_spec_sig_len) == 0)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (found)
-                {
-                    // If we found the TypeSpec, we can just use the existing token.
-                    free(imported_type_spec_sig);
-                    return md_cursor_to_token(destination_typespec, token);
-                }
-                
-                // If we didn't find the TypeSpec, we need to create a new one.
-                mdcursor_t new_typespec;
-                if (!md_append_row(destination_module_cxt, mdtid_TypeSpec, &new_typespec))
-                {
-                    free(imported_type_spec_sig);
-                    return false;
-                }
-                
-                // The TypeSpec table is unsorted, so we can commit the row-add here.
-                md_commit_row_add(new_typespec);
-
-                // Set the signature of the new TypeSpec.
-                if (!md_set_column_value_as_blob(new_typespec, mdtTypeSpec_Signature, 1, &imported_type_spec_sig, &imported_type_spec_sig_len))
-                {
-                    free(imported_type_spec_sig);
-                    return false;
-                }
-
-                // Now that we've set the column value, we can free our signature buffer.
-                free(imported_type_spec_sig);
-
-                // Update the token to the new TypeSpec token.
-                return md_cursor_to_token(new_typespec, token);
-            }
+            return import_typespec(
+                source_assembly_cxt,
+                source_module_cxt,
+                destination_assembly_cxt,
+                destination_module_cxt,
+                token);
         default:
             assert(false && "Unknown token type");
             return false;
     }
 
     return false;
+}
+
+bool md_import_typedef(
+    mdhandle_t source_assembly,
+    mdhandle_t source_module,
+    mdhandle_t destination_assembly,
+    mdhandle_t destination_module,
+    uint8_t const* source_assembly_hash,
+    uint32_t source_assembly_hash_length,
+    mdToken* token)
+{
+    if (token == NULL || source_assembly_hash == NULL)
+        return false;
+
+    if (ExtractTokenType(*token) != mdtid_TypeDef)
+        return false;
+    
+    mdcxt_t* source_assembly_cxt = extract_mdcxt(source_assembly);
+    if (source_assembly_cxt == NULL)
+        return false;
+
+    mdcxt_t* source_module_cxt = extract_mdcxt(source_module);
+    if (source_module_cxt == NULL)
+        return false;
+
+    mdcxt_t* destination_assembly_cxt = extract_mdcxt(destination_assembly);
+    if (destination_assembly_cxt == NULL)
+        return false;
+
+    mdcxt_t* destination_module_cxt = extract_mdcxt(destination_module);
+    if (destination_module_cxt == NULL)
+        return false;
+
+    return import_typedef(
+        source_assembly_cxt,
+        source_module_cxt,
+        destination_assembly_cxt,
+        destination_module_cxt,
+        false,
+        token);
 }
 
 bool md_import_signature(mdhandle_t source_assembly, mdhandle_t source_module, mdhandle_t destination_assembly, mdhandle_t destination_module, uint8_t const* sig, size_t sig_len, uint8_t** imported_sig, size_t* imported_sig_len)
