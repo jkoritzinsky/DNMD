@@ -279,8 +279,8 @@ static bool reserve_space(uint8_t** sig_blob, size_t* sig_buffer_size, size_t re
         return true;
     
     // Scale by 2x or the requested space, whichever is larger.
-    size_t new_max_space = max(sig_buffer_size - remaining_space + requested_space, sig_buffer_size * 2);
-    size_t consumed_space = sig_buffer_size - requested_space;
+    size_t new_max_space = max(*sig_buffer_size - remaining_space + requested_space, *sig_buffer_size * 2);
+    size_t consumed_space = *sig_buffer_size - requested_space;
     uint8_t* new_sig_blob = realloc(*sig_blob - consumed_space, new_max_space); // We need to realloc from the start of the allocation, so back up from our consumed space to the start.
     if (new_sig_blob == NULL)
         return false;
@@ -319,11 +319,7 @@ static bool import_token(
     mdcxt_t* source_module_cxt,
     mdcxt_t* destination_assembly_cxt,
     mdcxt_t* destination_module_cxt,
-    mdToken token)
-{
-    // TODO: Implement token importing.
-    return false;
-}
+    mdToken* token);
 
 static bool insert_compressed_u32(uint8_t** sig, size_t* sig_length, size_t* sig_buffer_size, uint32_t value)
 {
@@ -372,7 +368,7 @@ static bool import_sig_element(
     mdcxt_t* source_module_cxt,
     mdcxt_t* destination_assembly_cxt,
     mdcxt_t* destination_module_cxt,
-    uint8_t const* sig,
+    uint8_t const** sig,
     size_t* sig_length,
     uint8_t** imported_sig,
     size_t* sig_buffer_size,
@@ -395,8 +391,6 @@ static bool import_sig_element(
         return false;
     }
 
-    assert(elem_type != ELEMENT_TYPE_SENTINEL && "The SENTINEL element should be handled by the caller.");
-
     switch (elem_type)
     {
         case ELEMENT_TYPE_VOID:
@@ -417,6 +411,7 @@ static bool import_sig_element(
         case ELEMENT_TYPE_TYPEDBYREF:
         case ELEMENT_TYPE_I:
         case ELEMENT_TYPE_U:
+        case ELEMENT_TYPE_SENTINEL:
             return true;
         case ELEMENT_TYPE_FNPTR:
         {
@@ -511,12 +506,20 @@ static bool import_sig_element(
                     source_module_cxt,
                     destination_assembly_cxt,
                     destination_module_cxt,
-                    token)
-                && insert_compressed_u32(imported_sig, sig_buffer_size, remaining_imported_sig_length, encoded_token);
+                    &token)
+                && insert_compressed_u32(imported_sig, sig_buffer_size, remaining_imported_sig_length, token);
 
         case ELEMENT_TYPE_CMOD_REQD:
         case ELEMENT_TYPE_CMOD_OPT:
             return decompress_u32(sig, sig_length, &encoded_token)
+                && decode_type_def_or_ref_or_spec_encoded(encoded_token, &token)
+                && import_token(
+                    source_assembly_cxt,
+                    source_module_cxt,
+                    destination_assembly_cxt,
+                    destination_module_cxt,
+                    &token)
+                && insert_compressed_u32(imported_sig, sig_buffer_size, remaining_imported_sig_length, token)
                 && import_sig_element(
                 source_assembly_cxt,
                 source_module_cxt,
@@ -526,8 +529,7 @@ static bool import_sig_element(
                 sig_length,
                 imported_sig,
                 sig_buffer_size,
-                remaining_imported_sig_length)
-                && insert_compressed_u32(imported_sig, sig_buffer_size, remaining_imported_sig_length, encoded_token);
+                remaining_imported_sig_length);
 
         case ELEMENT_TYPE_ARRAY:
         {
@@ -594,8 +596,8 @@ static bool import_sig_element(
                     source_module_cxt,
                     destination_assembly_cxt,
                     destination_module_cxt,
-                    token)
-                || !insert_compressed_u32(imported_sig, sig_buffer_size, remaining_imported_sig_length, encoded_token))
+                    &token)
+                || !insert_compressed_u32(imported_sig, sig_buffer_size, remaining_imported_sig_length, token))
                 return false;
 
             uint32_t num_generic_args;
@@ -621,6 +623,122 @@ static bool import_sig_element(
         }
     }
     assert(false && "Unknown element type");
+    return false;
+}
+
+static bool import_token(
+    mdcxt_t* source_assembly_cxt,
+    mdcxt_t* source_module_cxt,
+    mdcxt_t* destination_assembly_cxt,
+    mdcxt_t* destination_module_cxt,
+    mdToken* token)
+{
+    switch (ExtractTokenType(*token))
+    {
+        case mdtid_TypeDef:
+            // TODO: Implement TypeDef import
+            break;
+        case mdtid_TypeRef:
+            // TODO: Implement TypeRef import
+            break;
+        case mdtid_TypeSpec:
+            {
+                // Import the signature of the TypeSpec from the source module and assembly into the destination module and assembly.
+                mdcursor_t source_typespec;
+                if (!md_token_to_cursor(source_module_cxt, *token, &source_typespec))
+                    return false;
+                uint8_t const* type_spec_sig;
+                uint32_t type_spec_sig_len;
+                if (1 != md_get_column_value_as_blob(source_typespec, mdtTypeSpec_Signature, 1, &type_spec_sig, &type_spec_sig_len))
+                    return false;
+                
+                size_t imported_type_spec_sig_buffer_len = type_spec_sig_len;
+                uint8_t* imported_type_spec_sig = malloc(imported_type_spec_sig_buffer_len);
+                if (imported_type_spec_sig == NULL)
+                    return false;
+                
+                size_t remaining_imported_type_spec_sig_length = type_spec_sig_len;
+                if (!import_sig_element(
+                    source_assembly_cxt,
+                    source_module_cxt,
+                    destination_assembly_cxt,
+                    destination_module_cxt,
+                    &type_spec_sig,
+                    &imported_type_spec_sig_buffer_len,
+                    &imported_type_spec_sig,
+                    &imported_type_spec_sig_buffer_len,
+                    &remaining_imported_type_spec_sig_length))
+                {
+                    free(imported_type_spec_sig);
+                    return false;
+                }
+                
+                uint32_t imported_type_spec_sig_len = (uint32_t)(imported_type_spec_sig_buffer_len - remaining_imported_type_spec_sig_length);
+                imported_type_spec_sig = imported_type_spec_sig - imported_type_spec_sig_len; // Move back to the start of the buffer.
+
+                // Check if a TypeSpec with the same signature already exists in the destination module.
+                mdcursor_t destination_typespec;
+                uint32_t count;
+                if (!md_create_cursor(destination_module_cxt, mdtid_TypeSpec, &destination_typespec, &count))
+                {
+                    free(imported_type_spec_sig);
+                    return false;
+                }
+
+                bool found = false;
+                for (uint32_t i = 0; i < count; ++i, md_cursor_next(&destination_typespec))
+                {
+                    uint8_t const* destination_type_spec_sig;
+                    uint32_t destination_type_spec_sig_len;
+                    if (1 != md_get_column_value_as_blob(destination_typespec, mdtTypeSpec_Signature, 1, &destination_type_spec_sig, &destination_type_spec_sig_len))
+                    {
+                        free(imported_type_spec_sig);
+                        return false;
+                    }
+
+                    if (destination_type_spec_sig_len == imported_type_spec_sig_len && memcmp(destination_type_spec_sig, imported_type_spec_sig, destination_type_spec_sig_len) == 0)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (found)
+                {
+                    // If we found the TypeSpec, we can just use the existing token.
+                    free(imported_type_spec_sig);
+                    return md_cursor_to_token(destination_typespec, token);
+                }
+                
+                // If we didn't find the TypeSpec, we need to create a new one.
+                mdcursor_t new_typespec;
+                if (!md_append_row(destination_module_cxt, mdtid_TypeSpec, &new_typespec))
+                {
+                    free(imported_type_spec_sig);
+                    return false;
+                }
+                
+                // The TypeSpec table is unsorted, so we can commit the row-add here.
+                md_commit_row_add(new_typespec);
+
+                // Set the signature of the new TypeSpec.
+                if (!md_set_column_value_as_blob(new_typespec, mdtTypeSpec_Signature, 1, &imported_type_spec_sig, &imported_type_spec_sig_len))
+                {
+                    free(imported_type_spec_sig);
+                    return false;
+                }
+
+                // Now that we've set the column value, we can free our signature buffer.
+                free(imported_type_spec_sig);
+
+                // Update the token to the new TypeSpec token.
+                return md_cursor_to_token(new_typespec, token);
+            }
+        default:
+            assert(false && "Unknown token type");
+            return false;
+    }
+
     return false;
 }
 
@@ -674,7 +792,7 @@ bool md_import_signature(mdhandle_t source_assembly, mdhandle_t source_module, m
             source_module_cxt,
             destination_assembly_cxt,
             destination_module_cxt,
-            sig,
+            &sig,
             &sig_len,
             &imported_sig_buffer,
             &imported_sig_buffer_size,
@@ -703,7 +821,7 @@ bool md_import_signature(mdhandle_t source_assembly, mdhandle_t source_module, m
                     source_module_cxt,
                     destination_assembly_cxt,
                     destination_module_cxt,
-                    sig,
+                    &sig,
                     &sig_len,
                     &imported_sig_buffer,
                     &imported_sig_buffer_size,
@@ -735,7 +853,7 @@ bool md_import_signature(mdhandle_t source_assembly, mdhandle_t source_module, m
                     source_module_cxt,
                     destination_assembly_cxt,
                     destination_module_cxt,
-                    sig,
+                    &sig,
                     &sig_len,
                     &imported_sig_buffer,
                     &imported_sig_buffer_size,
@@ -749,7 +867,6 @@ bool md_import_signature(mdhandle_t source_assembly, mdhandle_t source_module, m
         break;
     }
 
-    *imported_sig = get_sig_buffer_start(imported_sig_buffer, imported_sig_buffer_size, remaining_imported_sig_length);
     *imported_sig_len = imported_sig_buffer_size - remaining_imported_sig_length;
     *imported_sig = imported_sig_buffer - *imported_sig_len; // Move back to the start of the buffer.
     return true;
