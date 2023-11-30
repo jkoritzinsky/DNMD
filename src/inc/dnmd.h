@@ -483,6 +483,19 @@ bool md_is_field_sig(uint8_t const* sig, size_t sig_len);
 // If the return value is true, def_sig will be a pointer to malloc-d memory containing the MethodDefSig for the MethodRefSig.
 bool md_create_methoddefsig_from_methodrefsig(uint8_t const* ref_sig, size_t ref_sig_len, uint8_t** def_sig, size_t* def_sig_len);
 
+// Import a signature from one set of module and assembly metadata into another set of module and assembly metadata.
+// The module and assembly metadata for source or destination can be the same metadata.
+// The supported signature kinds are:
+// - MethodDefSig (II.23.2.1)
+// - MethodRefSig (II.23.2.2)
+// - StandaloneMethodSig (II.23.2.3)
+// - FieldSig (II.23.2.4)
+// - PropertySig (II.23.2.5)
+// - LocalVarSig (II.23.2.6)
+// - MethodSpec (II.23.2.15)
+// If the return value is true, imported_sig will be a pointer to malloc-d memory containing the imported signature.
+bool md_import_signature(mdhandle_t source_assembly, mdhandle_t source_module, mdhandle_t destination_assembly, mdhandle_t destination_module, uint8_t const* sig, size_t sig_len, uint8_t** imported_sig, size_t* imported_sig_len);
+
 // Given a cursor, resolve any indirections to the final cursor or return the original cursor if it does not point to an indirection table.
 // Returns true if the cursor was not an indirect cursor or if the indirection was resolved, or false if the cursor pointed to an invalid indirection table entry.
 bool md_resolve_indirect_cursor(mdcursor_t c, mdcursor_t* target);

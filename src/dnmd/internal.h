@@ -412,6 +412,9 @@ bool decompress_i32(uint8_t const** data, size_t* data_len, int32_t* o);
 // compressed_len is an in/out parameter. If compress_u32 returns true, then
 // compressed_len is set to the number of bytes written to compressed.
 bool compress_u32(uint32_t data, uint8_t* compressed, size_t* compressed_len);
+// compressed_len is an in/out parameter. If compress_u32 returns true, then
+// compressed_len is set to the number of bytes written to compressed.
+bool compress_i32(int32_t data, uint8_t* compressed, size_t* compressed_len);
 
 // Editing
 bool create_and_fill_indirect_table(mdcxt_t* cxt, mdtable_id_t original_table, mdtable_id_t indirect_table);

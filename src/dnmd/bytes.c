@@ -320,3 +320,51 @@ bool compress_u32(uint32_t data, uint8_t* compressed, size_t* compressed_len)
     }
     return true;
 }
+
+// II.23.2
+// This is a big-endian format in the physical form.
+bool compress_i32(int32_t data, uint8_t* compressed, size_t* compressed_len)
+{
+    const int b6 = (1 << 6) - 1;
+    const int b13 = (1 << 13) - 1;
+    const int b28 = (1 << 28) - 1;
+
+    // 0xffffffff for negative value
+    // 0x00000000 for non-negative
+    int signMask = data >> 31;
+
+    if ((data & ~b6) == (signMask & ~b6))
+    {
+        if (*compressed_len < 1)
+            return false;
+        int n = ((data & b6) << 1) | (signMask & 1);
+        compressed[0] = (uint8_t)n;
+        *compressed_len = 1;
+    }
+    else if ((data & ~b13) == (signMask & ~b13))
+    {
+        if (*compressed_len < 2)
+            return false;
+        int n = ((data & b13) << 1) | (signMask & 1);
+        compressed[0] = (uint8_t)(0x80 | (n >> 8));
+        compressed[1] = (uint8_t)n;
+        *compressed_len = 2;
+    }
+    else if ((data & ~b28) == (signMask & ~b28))
+    {
+        if (*compressed_len < 4)
+            return false;
+        
+        int n = ((data & b28) << 1) | (signMask & 1);
+        compressed[0] = (uint8_t)(0xc0 | (n >> 24));
+        compressed[1] = (uint8_t)(n >> 16);
+        compressed[2] = (uint8_t)(n >> 8);
+        compressed[3] = (uint8_t)n;
+        *compressed_len = 4;
+    }
+    else
+    {
+        return false;
+    }
+    return true;
+}
