@@ -1,26 +1,40 @@
 set(SOURCES
-  dispenser.cpp
-  metadataimport.cpp
-  hcorenum.cpp
-  pal.cpp
+  ./dispenser.cpp
+  ./symbinder.cpp
+  ./metadataimport.cpp
+  ./metadataemit.cpp
+  ./hcorenum.cpp
+  ./pal.cpp
+  ./signatures.cpp
+  ./importhelpers.cpp
   internal/metadataimport.cpp
 )
 
 set(HEADERS
   ../inc/dnmd_interfaces.hpp
+  ../inc/internal/span.hpp
   ./metadataimportro.hpp
+  ./metadataemit.hpp
   ./hcorenum.hpp
   ./controllingiunknown.hpp
   ./tearoffbase.hpp
   ./hcorenum.hpp
   ./pal.hpp
   ./dnmdowner.hpp
+  ./signatures.hpp
+  ./importhelpers.hpp
   internal/metadataimport.hpp
 )
 
 if(NOT MSVC)
   # Adds global GUID constants.
   list(APPEND SOURCES ./iids.cpp ./options.cpp)
+endif()
+
+if (WIN32)
+  # Disable "secure CRT" warnings when targeting Windows
+  # as the "secure CRT" is not cross-platform.
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
 add_library(dnmd_interfaces_static
@@ -47,7 +61,8 @@ target_include_directories(dnmd_interfaces PUBLIC $<INSTALL_INTERFACE:include>)
 target_include_directories(dnmd_interfaces PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(dnmd_interfaces_static PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-target_compile_definitions(dnmd_interfaces PRIVATE DNMD_BUILD_SHARED)
+target_compile_definitions(dnmd_interfaces_static PRIVATE COM_NO_WINDOWS_H)
+target_compile_definitions(dnmd_interfaces PRIVATE DNMD_BUILD_SHARED COM_NO_WINDOWS_H)
 
 target_link_libraries(dnmd_interfaces_static
   PUBLIC
@@ -78,6 +93,25 @@ if (NOT WIN32)
   include(FindICU)
   target_link_libraries(dnmd_interfaces_static PUBLIC ${ICU_TARGET_NAME})
   target_link_libraries(dnmd_interfaces PRIVATE ${ICU_TARGET_NAME})
+endif()
+
+if (WIN32)
+  target_link_libraries(dnmd_interfaces_static PUBLIC bcrypt)
+  target_link_libraries(dnmd_interfaces PRIVATE bcrypt)
+elseif(UNIX)
+  include(FindOpenSSL)
+  target_link_libraries(dnmd_interfaces_static PUBLIC OpenSSL::Crypto)
+  target_link_libraries(dnmd_interfaces PRIVATE OpenSSL::Crypto)
+elseif(APPLE)
+  find_library(SECURITY_LIBRARY Security REQUIRED)
+  target_link_libraries(dnmd_interfaces_static PUBLIC ${SECURITY_LIBRARY})
+  target_link_libraries(dnmd_interfaces PRIVATE ${SECURITY_LIBRARY})
+
+  include(CheckIncludeFile)
+  check_include_file("CommonCrypto/CommonDigest.h" HAVE_COMMON_DIGEST_H)
+  if (NOT HAVE_COMMON_DIGEST_H)
+    message(FATAL_ERROR "CommonCrypto/CommonDigest.h not found")
+  endif()
 endif()
 
 set_target_properties(dnmd_interfaces PROPERTIES

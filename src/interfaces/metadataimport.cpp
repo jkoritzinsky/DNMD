@@ -3,6 +3,7 @@
 #include "pal.hpp"
 #include "metadataimportro.hpp"
 #include "hcorenum.hpp"
+#include "signatures.hpp"
 #include <cstring>
 
 #define MD_MODULE_TOKEN TokenFromRid(1, mdtModule)
@@ -199,7 +200,7 @@ namespace
                 i += read;
             }
 
-            enumImpl = cleanup.release();
+            *pEnumImpl = cleanup.release();
             return S_OK;
         }
     }
@@ -396,8 +397,7 @@ HRESULT STDMETHODCALLTYPE MetadataImportRO::EnumInterfaceImpls(
         if (!md_create_cursor(_md_ptr.get(), mdtid_InterfaceImpl, &cursor, &rows))
             return CLDB_E_RECORD_NOTFOUND;
 
-        uint32_t id = RidFromToken(td);
-        RETURN_IF_FAILED(CreateEnumTokenRangeForSortedTableKey(_md_ptr.get(), mdtid_InterfaceImpl, mdtInterfaceImpl_Class, id, &enumImpl));
+        RETURN_IF_FAILED(CreateEnumTokenRangeForSortedTableKey(_md_ptr.get(), mdtid_InterfaceImpl, mdtInterfaceImpl_Class, td, &enumImpl));
         *phEnum = enumImpl;
     }
     return enumImpl->ReadTokens(rImpls, cMax, pcImpls);
@@ -1112,12 +1112,15 @@ HRESULT STDMETHODCALLTYPE MetadataImportRO::FindMethod(
     if (!md_get_column_value_as_range(typedefCursor, mdtTypeDef_MethodList, &methodCursor, &count))
         return CLDB_E_FILE_CORRUPT;
 
-    uint8_t* defSig;
-    size_t defSigLen;
-    if (!md_create_methoddefsig_from_methodrefsig(pvSigBlob, cbSigBlob, &defSig, &defSigLen))
+    malloc_span<uint8_t> methodDefSig;
+    try
+    {
+        methodDefSig = GetMethodDefSigFromMethodRefSig({ (uint8_t*)pvSigBlob, (size_t)cbSigBlob });    
+    }
+    catch (std::exception const&)
+    {
         return E_INVALIDARG;
-
-    malloc_ptr<uint8_t> methodDefSig{ defSig };
+    }
 
     pal::StringConvert<WCHAR, char> cvt{ szName };
     if (!cvt.Success())
@@ -1149,8 +1152,8 @@ HRESULT STDMETHODCALLTYPE MetadataImportRO::FindMethod(
             uint32_t sigLen;
             if (1 != md_get_column_value_as_blob(target, mdtMethodDef_Signature, 1, &sig, &sigLen))
                 return CLDB_E_FILE_CORRUPT;
-            if (sigLen != defSigLen
-                || ::memcmp(methodDefSig.get(), sig, sigLen) != 0)
+            if (sigLen != methodDefSig.size()
+                || ::memcmp(methodDefSig, sig, sigLen) != 0)
             {
                 continue;
             }
@@ -2723,7 +2726,7 @@ HRESULT STDMETHODCALLTYPE MetadataImportRO::GetCustomAttributeByName(
     mdcursor_t cursor;
     uint32_t count;
     if (!md_create_cursor(_md_ptr.get(), mdtid_CustomAttribute, &cursor, &count))
-        return CLDB_E_RECORD_NOTFOUND;
+        return S_FALSE; // If no custom attributes are defined, treat it the same as if the attribute is not found.
 
     char buffer[1024];
     pal::StringConvert<WCHAR, char> cvt{ szName, buffer };
@@ -2733,7 +2736,7 @@ HRESULT STDMETHODCALLTYPE MetadataImportRO::GetCustomAttributeByName(
     struct
     {
         HRESULT hr;
-        const void** ppData;
+        void const** ppData;
         ULONG* pcbData;
         pal::StringConvert<WCHAR, char> const& cvt;
 

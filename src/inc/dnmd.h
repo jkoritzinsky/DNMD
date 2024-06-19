@@ -38,8 +38,23 @@ typedef void* mdhandle_t;
 // If modifications are made, the data will not be updated in place.
 bool md_create_handle(void const* data, size_t data_len, mdhandle_t* handle);
 
+// Create a new metadata handle for a new image.
+// Returns a handle for the new image, or NULL if the handle could not be created.
+// The image will always be in the v1.1 ECMA-355 metadata format,
+// use the "v4.0.30319" version string,
+// and have an MVID of all zeros.
+mdhandle_t md_create_new_handle();
+
+#ifdef DNMD_PORTABLE_PDB
+// Create a new metadata handle for a new Portable PDB image.
+// Returns a handle for the new image, or NULL if the handle could not be created.
+// The image will always be in the v1.1 metadata format
+// and use the "PDB v1.0" version string.
+mdhandle_t md_create_new_pdb_handle();
+#endif // DNMD_PORTABLE_PDB
+
 // Apply delta data to the current metadata.
-bool md_apply_delta(mdhandle_t handle, void const* data, size_t data_len);
+bool md_apply_delta(mdhandle_t handle, mdhandle_t delta_handle);
 
 // Destroy the metadata handle and free all associated memory.
 void md_destroy_handle(mdhandle_t handle);
@@ -476,13 +491,6 @@ md_range_result_t md_find_range_from_cursor(mdcursor_t begin, col_index_t idx, u
 bool md_find_token_of_range_element(mdcursor_t element, mdToken* tk);
 bool md_find_cursor_of_range_element(mdcursor_t element, mdcursor_t* cursor);
 
-bool md_is_field_sig(uint8_t const* sig, size_t sig_len);
-
-// Create the equivalent MethodDefSig (II.23.2.1) from a MethodRefSig (II.23.2.2).
-// ref_sig is a pointer to a MethodRefSig blob.
-// If the return value is true, def_sig will be a pointer to malloc-d memory containing the MethodDefSig for the MethodRefSig.
-bool md_create_methoddefsig_from_methodrefsig(uint8_t const* ref_sig, size_t ref_sig_len, uint8_t** def_sig, size_t* def_sig_len);
-
 // Given a cursor, resolve any indirections to the final cursor or return the original cursor if it does not point to an indirection table.
 // Returns true if the cursor was not an indirect cursor or if the indirection was resolved, or false if the cursor pointed to an invalid indirection table entry.
 bool md_resolve_indirect_cursor(mdcursor_t c, mdcursor_t* target);
@@ -521,12 +529,22 @@ bool md_append_row(mdhandle_t handle, mdtable_id_t table_id, mdcursor_t* new_row
 // The table that new_child_row points to is treated as unsorted until md_commit_row_add is called after all columns have been set on the new row.
 bool md_add_new_row_to_list(mdcursor_t list_owner, col_index_t list_col, mdcursor_t* new_row);
 
+// Creates a new row in the list for the given cursor specified by the given column such that the values of the sort_order_col are maintained in ascending order.
+// This method assumes that the list is currently sorted by the sort_order_col column.
+// This method accounts for any indirection tables that may need to be created or maintained to ensure that
+// the structure of the list is maintained without moving tokens.
+// The table that new_row points to is treated as unsorted until md_commit_row_add is called after all columns have been set on the new row.
+// The new_row row will also have the sort_order_col column initialized to sort_col_value.
+bool md_add_new_row_to_sorted_list(mdcursor_t list_owner, col_index_t list_col, col_index_t sort_order_col, uint32_t sort_col_value, mdcursor_t* new_row);
+
 // Finish the process of adding a row to the cursor's table.
 void md_commit_row_add(mdcursor_t row);
 
 // Add a user string to the #US heap.
 mduserstringcursor_t md_add_userstring_to_heap(mdhandle_t handle, char16_t const* userstring);
 
+// Write the metadata represented by the handle to the supplied buffer.
+// The metadata is always written with the v2.0 table schema.
 bool md_write_to_buffer(mdhandle_t handle, uint8_t* buffer, size_t* len);
 #ifdef __cplusplus
 }

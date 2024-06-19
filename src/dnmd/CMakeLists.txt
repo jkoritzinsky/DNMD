@@ -7,7 +7,6 @@ set(SOURCES
   query.c
   streams.c
   tables.c
-  sig.c
   write.c
 )
 
@@ -39,10 +38,12 @@ target_include_directories(dnmd_pdb PUBLIC $<INSTALL_INTERFACE:include>)
 
 set_target_properties(dnmd PROPERTIES
   PUBLIC_HEADER "../inc/dnmd.h;../inc/dnmd.hpp"
-  UNITY_BUILD ON)
+  UNITY_BUILD ON
+  POSITION_INDEPENDENT_CODE ON)
 
 set_target_properties(dnmd_pdb PROPERTIES
-  PUBLIC_HEADER "../inc/dnmd.h;../inc/dnmd.hpp;../inc/dnmd_pdb.h")
+  PUBLIC_HEADER "../inc/dnmd.h;../inc/dnmd.hpp;../inc/dnmd_pdb.h"
+  POSITION_INDEPENDENT_CODE ON)
 
 install(TARGETS dnmd dnmd_pdb EXPORT dnmd
   PUBLIC_HEADER DESTINATION include

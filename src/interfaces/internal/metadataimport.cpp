@@ -7,6 +7,7 @@
 #endif // DNMD_BUILD_SHARED
 #include "metadataimport.hpp"
 #include "dnmd_interfaces.hpp"
+#include "signatures.hpp"
 #include "../hcorenum.hpp"
 
 #include <cassert>
@@ -2849,12 +2850,7 @@ STDMETHODIMP InternalMetadataImportRO::FindMethodDefUsingCompare(
     if (!md_get_column_value_as_range(typedefCursor, mdtTypeDef_MethodList, &methodCursor, &count))
         return CLDB_E_FILE_CORRUPT;
 
-    uint8_t* defSig;
-    size_t defSigLen;
-    if (!md_create_methoddefsig_from_methodrefsig(pvSigBlob, cbSigBlob, &defSig, &defSigLen))
-        return E_INVALIDARG;
-
-    malloc_ptr<uint8_t> methodDefSig{ defSig };
+    malloc_span<uint8_t> methodDefSig = GetMethodDefSigFromMethodRefSig({(uint8_t*)pvSigBlob, (size_t)cbSigBlob});
 
     for (uint32_t i = 0; i < count; (void)md_cursor_next(&methodCursor), ++i)
     {
@@ -2882,8 +2878,8 @@ STDMETHODIMP InternalMetadataImportRO::FindMethodDefUsingCompare(
             uint32_t sigLen;
             if (1 != md_get_column_value_as_blob(method, mdtMethodDef_Signature, 1, &sig, &sigLen))
                 return CLDB_E_FILE_CORRUPT;
-            if (sigLen != defSigLen
-                || (pSignatureCompare(sig, sigLen, methodDefSig.get(), (uint32_t)defSigLen, pSignatureArgs) == FALSE))
+            if (sigLen != methodDefSig.size()
+                || (pSignatureCompare(sig, sigLen, methodDefSig, (DWORD)methodDefSig.size(), pSignatureArgs) == FALSE))
             {
                 continue;
             }
